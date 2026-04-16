@@ -8,7 +8,6 @@ import psutil
 from aiofiles import open as aiopen
 from pyrogram import Client, filters
 from pyrogram.enums import ParseMode
-from aiofiles import open as aiopen
 
 from config import (
     API_ID, API_HASH, BOT_TOKEN,
@@ -79,10 +78,17 @@ async def get_media_info(file_path):
         file_path
     ]
 
-    process = subprocess.run(cmd, stdout=subprocess.PIPE)
-    data = json.loads(process.stdout)
+    process = await asyncio.to_thread(
+        subprocess.run,
+        cmd,
+        stdout=subprocess.PIPE,
+        timeout=15,
+        check=False
+    )
+    data = json.loads(process.stdout.decode("utf-8", errors="ignore"))
 
     duration = float(data.get("format", {}).get("duration", 0))
+    width = None
     height = None
     codec = None
     bit_depth = ""
@@ -90,15 +96,20 @@ async def get_media_info(file_path):
     subtitle_languages = set()
 
     for stream in data.get("streams", []):
-        if stream["codec_type"] == "video":
+        if stream["codec_type"] == "video" and height is None:
+            width = stream.get("width")
             height = stream.get("height")
+            
+            if not height or not width:
+                height = stream.get("coded_height")
+                width = stream.get("coded_width")
 
             raw = (stream.get("codec_name") or "").lower()
 
             if raw in ["hevc", "h265"]:
-                codec = "x265"
+                codec = "HEVC"
             elif raw in ["h264", "avc"]:
-                codec = "x264"
+                codec = "H264"
             elif raw == "av1":
                 codec = "AV1"
 
@@ -116,6 +127,7 @@ async def get_media_info(file_path):
 
     return (
         duration,
+        width,
         height,
         codec,
         bit_depth,
@@ -129,15 +141,26 @@ def format_duration(s):
     return f"{s//3600:02}:{(s%3600)//60:02}:{s%60:02}"
 
 
-def get_quality(h):
-    if not h:
+def get_quality(width, height):
+    if not width or not height:
         return None
-    if h >= 1080:
-        return "1080p"
-    if h >= 720:
-        return "720p"
-    if h >= 480:
-        return "480p"
+
+    h = min(width, height)
+
+    standards = [
+        (2160, "2160p"),
+        (1440, "1440p"),
+        (1080, "1080p"),
+        (720,  "720p"),
+        (480,  "480p"),
+        (360,  "360p"),
+        (240,  "240p"),
+    ]
+
+    for std_h, label in standards:
+        if h >= std_h * 0.7:
+            return label
+
     return f"{h}p"
 
 
@@ -152,8 +175,8 @@ async def process_message(message):
             await f.write(chunk)
 
     try:
-        duration, height, codec, bit_depth, audio, sub = await get_media_info(temp)
-        if duration == 0:
+        duration, width, height, codec, bit_depth, audio, sub = await get_media_info(temp)
+        if duration == 0 or not width or not height:
             raise Exception()
         file_path = temp
     except:
@@ -161,9 +184,10 @@ async def process_message(message):
             os.remove(temp)
 
         file_path = await message.download()
-        duration, height, codec, bit_depth, audio, sub = await get_media_info(file_path)
+        duration, width, height, codec, bit_depth, audio, sub = await get_media_info(file_path)
 
-    quality = get_quality(height)
+    quality = get_quality(width, height) if width and height else "Unknown"
+
     video_line = " ".join(filter(None, [quality, codec, bit_depth])) or "Unknown"
 
     caption = CAPTION_TEMPLATE.format(
@@ -264,6 +288,7 @@ async def update(_, m):
 
     except Exception as e:
         await m.reply_text(f"Update failed: {e}")
+
 
 async def main():
 
