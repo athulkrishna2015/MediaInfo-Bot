@@ -85,6 +85,7 @@ async def get_media_info(file_path):
         timeout=15,
         check=False
     )
+
     data = json.loads(process.stdout.decode("utf-8", errors="ignore"))
 
     duration = float(data.get("format", {}).get("duration", 0))
@@ -92,36 +93,55 @@ async def get_media_info(file_path):
     height = None
     codec = None
     bit_depth = ""
+    hdr = ""
+
     audio_languages = set()
     subtitle_languages = set()
 
     for stream in data.get("streams", []):
-        if stream["codec_type"] == "video" and height is None:
-            width = stream.get("width")
-            height = stream.get("height")
-            
-            if not height or not width:
-                height = stream.get("coded_height")
-                width = stream.get("coded_width")
 
-            raw = (stream.get("codec_name") or "").lower()
+        if stream.get("codec_type") == "video" and height is None:
+            width = stream.get("width") or stream.get("coded_width")
+            height = stream.get("height") or stream.get("coded_height")
 
-            if raw in ["hevc", "h265"]:
+            raw_codec = (stream.get("codec_name") or "").lower()
+
+            if raw_codec in ["hevc", "h265"]:
                 codec = "HEVC"
-            elif raw in ["h264", "avc"]:
+            elif raw_codec in ["h264", "avc"]:
                 codec = "H264"
-            elif raw == "av1":
+            elif raw_codec == "av1":
                 codec = "AV1"
 
-            bits = stream.get("bits_per_raw_sample") or stream.get("bits_per_sample")
-            if str(bits) == "10":
-                bit_depth = "10Bit"
+            pix_fmt = (stream.get("pix_fmt") or "").lower()
+            profile = (stream.get("profile") or "").lower()
 
-        elif stream["codec_type"] == "audio":
+            if ("10le" in pix_fmt) or ("p010" in pix_fmt) or ("10bit" in profile):
+                bit_depth = "10Bit"
+            else:
+                bit_depth = ""
+
+            color_transfer = (stream.get("color_transfer") or "").lower()
+            color_space = (stream.get("color_space") or "").lower()
+            color_primaries = (stream.get("color_primaries") or "").lower()
+            profile_full = (stream.get("profile") or "").lower()
+
+            if (
+                "smpte2084" in color_transfer or
+                "arib-std-b67" in color_transfer or
+                "bt2020" in color_space or
+                "bt2020" in color_primaries
+            ):
+                hdr = "HDR"
+
+            if "dolby" in profile_full:
+                hdr = "Dolby Vision"
+
+        elif stream.get("codec_type") == "audio":
             lang = stream.get("tags", {}).get("language", "und").lower()
             audio_languages.add(LANG_MAP.get(lang, lang.capitalize()))
 
-        elif stream["codec_type"] == "subtitle":
+        elif stream.get("codec_type") == "subtitle":
             lang = stream.get("tags", {}).get("language", "und").lower()
             subtitle_languages.add(LANG_MAP.get(lang, lang.capitalize()))
 
@@ -131,6 +151,7 @@ async def get_media_info(file_path):
         height,
         codec,
         bit_depth,
+        hdr,
         ", ".join(sorted(audio_languages)) if audio_languages else "Unknown",
         ", ".join(sorted(subtitle_languages)) if subtitle_languages else "No Sub"
     )
@@ -175,7 +196,7 @@ async def process_message(message):
             await f.write(chunk)
 
     try:
-        duration, width, height, codec, bit_depth, audio, sub = await get_media_info(temp)
+        duration, width, height, codec, bit_depth, hdr, audio, sub = await get_media_info(temp)
         if duration == 0 or not width or not height:
             raise Exception()
         file_path = temp
@@ -188,7 +209,7 @@ async def process_message(message):
 
     quality = get_quality(width, height) if width and height else "Unknown"
 
-    video_line = " ".join(filter(None, [quality, codec, bit_depth])) or "Unknown"
+    video_line = " ".join(filter(None, [quality, codec, bit_depth, hdr])) or "Unknown"
 
     caption = CAPTION_TEMPLATE.format(
         title=message.caption or media.file_name or "Video",
