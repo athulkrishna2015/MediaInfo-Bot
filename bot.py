@@ -166,21 +166,32 @@ def get_quality(width, height):
     if not width or not height:
         return None
 
+    w = max(width, height)
     h = min(width, height)
 
-    standards = [
-        (2160, "2160p"),
-        (1440, "1440p"),
-        (1080, "1080p"),
-        (720,  "720p"),
-        (480,  "480p"),
-        (360,  "360p"),
-        (240,  "240p"),
-    ]
+    if w >= 3500:
+        return "2160p"
+    elif w >= 2000:
+        return "1080p"
+    elif w >= 1500:
+        return "720p"
+    elif w >= 1000:
+        return "480p"
+    elif w >= 700:
+        return "360p"
 
-    for std_h, label in standards:
-        if h >= std_h * 0.8:
-            return label
+    if h >= 2000:
+        return "2160p"
+    elif h >= 1300:
+        return "1440p"
+    elif h >= 800:
+        return "1080p"
+    elif h >= 600:
+        return "720p"
+    elif h >= 400:
+        return "480p"
+    elif h >= 300:
+        return "360p"
 
     return f"{h}p"
 
@@ -225,6 +236,7 @@ async def process_message(message):
 async def worker():
     while True:
         message, mode = await queue.get()
+        file_path = None
 
         async with processing_lock:
             try:
