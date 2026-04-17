@@ -58,13 +58,13 @@ _LANGUAGE_MAP = {
     'pl': 'Polish','pol': 'Polish',
     'vi': 'Vietnamese','vie': 'Vietnamese',
     'id': 'Indonesian','ind': 'Indonesian',
-    'unknown': 'Unknown'
+    'unknown': 'Original', 'und': 'Original'
 }
 
 @lru_cache(maxsize=256)
 def get_full_language_name(code: str) -> str:
     if not code:
-        return 'Unknown'
+        return 'Original'
     return _LANGUAGE_MAP.get(code.lower(), code)
 
 def get_video_format(codec: str, transfer: str = '', hdr: str = '', bit_depth: str = '') -> Optional[str]:
@@ -86,8 +86,8 @@ def get_video_format(codec: str, transfer: str = '', hdr: str = '', bit_depth: s
         return None
 
     try:
-        if bit_depth and int(bit_depth) == 10:
-            format_info.append('10bit')
+        if bit_depth and int(bit_depth) > 8:
+            format_info.append(f"{bit_depth}bit")
     except:
         pass
 
@@ -134,7 +134,8 @@ async def get_media_info(file_path):
     ]
 
     process = await asyncio.to_thread(
-        subprocess.run, cmd,
+        subprocess.run,
+        cmd,
         stdout=subprocess.PIPE,
         timeout=15,
         check=False
@@ -162,13 +163,26 @@ async def get_media_info(file_path):
 
             pix_fmt = (stream.get("pix_fmt") or "").lower()
             profile = (stream.get("profile") or "").lower()
+            bits_per_raw = stream.get("bits_per_raw_sample")
 
-            if "10" in pix_fmt or "10" in profile:
+            if bits_per_raw:
+                bit_depth = str(bits_per_raw)
+            elif any(x in pix_fmt for x in ["p10", "10", "yuv420p10", "yuv422p10", "yuv444p10"]):
                 bit_depth = "10"
+            elif any(x in pix_fmt for x in ["p12", "12"]):
+                bit_depth = "12"
+            elif any(x in pix_fmt for x in ["yuv420p", "yuv422p", "yuv444p"]):
+                bit_depth = "8"
+            else:
+                bit_depth = "8"
 
             transfer = (stream.get("color_transfer") or "").lower()
+            color_space = (stream.get("color_space") or "").lower()
+            color_primaries = (stream.get("color_primaries") or "").lower()
 
-            if any(x in transfer for x in ["smpte2084", "arib-std-b67", "pq", "hlg"]):
+            if any(x in transfer for x in ["smpte2084", "arib-std-b67", "pq", "hlg"]) \
+               or "bt2020" in color_space \
+               or "bt2020" in color_primaries:
                 hdr = "HDR"
 
             if "dolby" in profile:
@@ -334,11 +348,12 @@ async def info_command(_, message):
             async for chunk in app.stream_media(media, limit=STREAM_LIMIT):
                 await f.write(chunk)
 
-        duration, width, height, codec, bit_depth, hdr, audio, sub = await get_media_info(temp_path)
+        duration, width, height, codec, bit_depth, hdr, transfer, audio, sub = await get_media_info(temp_path)
 
         quality = get_quality(width, height) if width and height else "Unknown"
 
-        video_line = " ".join(filter(None, [quality, codec, bit_depth, hdr])) or "Unknown"
+        format_info = get_video_format(codec, transfer, hdr, bit_depth)
+        video_line = " ".join(filter(None, [quality, format_info])) or "Unknown"
 
         text = (
             f"<b>📊 Media Info</b>\n\n"
