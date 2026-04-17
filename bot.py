@@ -410,6 +410,7 @@ async def update(_, m):
 
     try:
         os.system("git pull")
+        os.system("pip install -r requirements.txt --no-cache-dir --upgrade")
         await m.reply_text("✅ Updated. Restarting...")
         os.execv(sys.executable, ["python"] + sys.argv)
 
