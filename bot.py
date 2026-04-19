@@ -31,7 +31,7 @@ logging.getLogger("pyrogram").setLevel(logging.ERROR)
 
 logger = logging.getLogger(__name__)
 
-app = Client("MyMediaInfoRoBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=4)
+app = Client("MediaInfo-Bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=4)
 
 scheduler = AsyncIOScheduler()
 stream_semaphore = asyncio.Semaphore(2)
@@ -537,19 +537,7 @@ async def channel_handler(_, message):
     if caption_has_media_info(message.caption or ""):
         return
 
-    original_caption = message.caption or ""
-
     caption, file_path = await process_message(message)
-
-    if not caption or "❌ Could not extract media info" in caption:
-        if original_caption:
-            caption = original_caption
-        else:
-            return
-
-    else:
-        if original_caption:
-            caption = f"{original_caption}\n\n{caption}"
 
     channel_id = message.chat.id
 
