@@ -31,19 +31,19 @@ logging.getLogger("pyrogram").setLevel(logging.ERROR)
 
 logger = logging.getLogger(__name__)
 
-app = Client("MediaInfo-Bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=4)
+app = Client("MediaInfo-Bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=4, sleep_threshold=0)
 
 scheduler = AsyncIOScheduler()
-stream_semaphore = asyncio.Semaphore(2)
+stream_semaphore = asyncio.Semaphore(3)
 active_users = set()
 _last_edit = {}
 channel_queues = defaultdict(list)
 channel_locks = defaultdict(asyncio.Lock)
 last_edit_time = {}
 
-EDIT_DELAY = 2.5
+EDIT_DELAY = 2.1
 
-async def safe_edit(msg, text, delay=1.5, parse_mode=None):
+async def safe_edit(msg, text, delay=1.7, parse_mode=None):
     if not msg:
         return
 
@@ -62,7 +62,7 @@ async def safe_edit(msg, text, delay=1.5, parse_mode=None):
         pass
 
 async def api_delay():
-    await asyncio.sleep(0.4)
+    await asyncio.sleep(1.7)
 
 _LANGUAGE_MAP = {
     'en': 'English',  'eng': 'English',
@@ -272,7 +272,7 @@ async def get_media_info(file_path):
         )
 
         try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=5)
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=8)
         except asyncio.TimeoutError:
             process.kill()
             await process.wait()
@@ -372,7 +372,7 @@ async def process_message(message, progress_msg=None):
 
             async with stream_semaphore:
                 async with aiopen(temp_file, "wb") as f:
-                    async for chunk in app.stream_media(media, limit=1):
+                    async for chunk in app.stream_media(media):
                         if not chunk:
                             break
                         await f.write(chunk[:target_size])
@@ -388,7 +388,7 @@ async def process_message(message, progress_msg=None):
             result = await get_media_info(temp_file)
             duration, width, height = result[:3]
 
-            if width and height and duration > 0:
+            if width and height and duration > 300:
                 return build_caption(message, media, result), None
 
         except Exception as e:
@@ -416,7 +416,7 @@ async def process_message(message, progress_msg=None):
 
             async with stream_semaphore:
                 async with aiopen(temp_file, "wb") as f:
-                    async for chunk in app.stream_media(media, limit=1):
+                    async for chunk in app.stream_media(media):
                         if not chunk:
                             break
 
@@ -439,7 +439,7 @@ async def process_message(message, progress_msg=None):
             result = await get_media_info(temp_file)
             duration, width, height = result[:3]
 
-            if width and height and duration > 0:
+            if width and height and duration > 300:
                 return build_caption(message, media, result), None
 
         except Exception as e:
@@ -678,7 +678,7 @@ async def main():
 
     await app.send_message(ADMIN_ID, "🚀 Bot Started")
 
-    scheduler.add_job(run_gc, "interval", minutes=10)
+    scheduler.add_job(run_gc, "interval", minutes=20)
     scheduler.start()
 
     await asyncio.Event().wait()
