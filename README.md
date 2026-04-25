@@ -10,31 +10,45 @@
 - Rich caption output with resolution, codec, bit depth, HDR, duration, audio, and subtitle labels
 - `/info` fallback to full download when partial probing is not enough
 - Photo, video, and document support in private chats
+- Photo captions use `📸` with dimensions like `480x270` instead of video-style `240p`
+- Empty audio/subtitle lines are omitted when no tracks are present
+- Existing captions are preserved, and filenames are appended for videos/documents when available
 - Channel/group auto-editing for allowed chats only
 - Admin commands for server status, restart, update, shutdown, and history scans
 - Optional user-helper account via `STRING_SESSION` for history scans
 - Config validation on startup with clear error messages
 
-## Caption Template
+## Caption Output
 
-The bot uses `CAPTION_TEMPLATE` with Python `str.format()` placeholders:
-
-| Placeholder | Description |
-|---|---|
-| `{title}` | Original caption or filename |
-| `{video_line}` | Resolution + codec details, for example `1080p HEVC 10bit HDR` |
-| `{duration}` | Duration as `HH:MM:SS` |
-| `{audio}` | Audio language list |
-| `{subtitle}` | Subtitle list or `No Sub` |
-
-Default output:
+Typical video caption:
 
 ```html
-<b>{title}</b>
+<b>Sample Movie</b>
+movie.mkv
+🎬 <b>1080p HEVC 10bit HDR</b> | ⏳ <b>01:45:32</b>
+🔊 <b>English, Hindi</b>
+💬 <b>English</b>
+```
 
-🎬 <b>{video_line}</b> | ⏳ <b>{duration}</b>
-🔊 <b>{audio}</b>
-💬 <b>{subtitle}</b>
+Video with no audio/subtitle tracks:
+
+```html
+<b>Sample Movie</b>
+movie.mkv
+🎬 <b>1080p HEVC 10bit HDR</b> | ⏳ <b>01:45:32</b>
+```
+
+Photo with no text caption:
+
+```html
+📸 <b>480x270</b>
+```
+
+Generic document:
+
+```html
+archive.zip
+📄 <b>12.1 KiB</b>
 ```
 
 ## Requirements
@@ -97,7 +111,6 @@ Configuration reference:
 | `GC_THRESHOLD_0` | GC threshold gen 0 | No |
 | `GC_THRESHOLD_1` | GC threshold gen 1 | No |
 | `GC_THRESHOLD_2` | GC threshold gen 2 | No |
-| `CAPTION_TEMPLATE` | Custom HTML caption template | No |
 
 ### 4. Run
 
@@ -148,6 +161,8 @@ Scan examples:
 - If `ALLOWED_CHATS` is empty, auto-editing for channels/groups is disabled, but private chat features still work.
 - History scans use the bot account first. If that fails and `STRING_SESSION` is configured, the bot falls back to the user helper account.
 - Generic documents get a lightweight size caption instead of media-track details.
+- Photos do not invent a filename line if Telegram does not provide one.
+- If a video/document already has a caption and also has a filename, both are shown.
 
 ## Project Structure
 
