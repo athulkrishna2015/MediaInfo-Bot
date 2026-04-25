@@ -894,27 +894,47 @@ def caption_has_media_info(caption: str) -> bool:
 
 
 async def _stream_chunk(client: Client, media: Any, size: int, path: str) -> bool:
-    try:
-        written = 0
-        async with stream_semaphore:
-            async with aiopen(path, "wb") as file_obj:
-                async for chunk in client.stream_media(media):
-                    if not chunk:
-                        break
-                    remaining = size - written
-                    if remaining <= 0:
-                        break
-                    piece = chunk[:remaining]
-                    await file_obj.write(piece)
-                    written += len(piece)
-                    if written >= size:
-                        break
-        return os.path.exists(path) and os.path.getsize(path) > 0
-    except FloodWait:
-        raise
-    except Exception as exc:
-        logger.warning("stream_chunk failed (%s): %s", size, exc)
-        return False
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            written = 0
+            async with stream_semaphore:
+                async with aiopen(path, "wb") as file_obj:
+                    async for chunk in client.stream_media(media):
+                        if not chunk:
+                            break
+                        remaining = size - written
+                        if remaining <= 0:
+                            break
+                        piece = chunk[:remaining]
+                        await file_obj.write(piece)
+                        written += len(piece)
+                        if written >= size:
+                            break
+            return os.path.exists(path) and os.path.getsize(path) > 0
+        except FloodWait:
+            raise
+        except OSError as exc:
+            # Non-retryable filesystem error
+            logger.warning("stream_chunk I/O error (%s): %s", size, exc)
+            return False
+        except Exception as exc:
+            exc_name = type(exc).__name__
+            exc_msg = str(exc).strip() or "(no message)"
+            if attempt < max_retries - 1:
+                wait = 2 ** attempt  # 1s, 2s
+                logger.debug(
+                    "stream_chunk %s/%s failed (%s) [%s: %s] — retrying in %ss",
+                    attempt + 1, max_retries, size, exc_name, exc_msg, wait,
+                )
+                await asyncio.sleep(wait)
+                continue
+            logger.warning(
+                "stream_chunk failed after %s attempts (%s) [%s: %s]",
+                max_retries, size, exc_name, exc_msg,
+            )
+            return False
+    return False
 
 
 def _has_enough_info(info: dict[str, Any], *, is_photo: bool) -> bool:
