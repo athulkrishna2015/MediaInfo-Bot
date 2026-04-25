@@ -59,7 +59,15 @@ API_ID = _read_int("API_ID", required=True)
 API_HASH = _read_env("API_HASH")
 BOT_TOKEN = _read_env("BOT_TOKEN")
 STRING_SESSION = _read_env("STRING_SESSION")
-ADMIN_ID = _read_int("ADMIN_ID", required=True)
+# Support both ADMIN_IDS (comma-separated) and legacy ADMIN_ID (single)
+_admin_ids_list = _read_int_list("ADMIN_IDS")
+_legacy_admin_id = _read_int("ADMIN_ID")
+if not _admin_ids_list and _legacy_admin_id is not None:
+    _admin_ids_list = [_legacy_admin_id]
+if not _admin_ids_list:
+    CONFIG_ERRORS.append("ADMIN_IDS (or ADMIN_ID) is required.")
+ADMIN_IDS: list[int] = _admin_ids_list
+ADMIN_ID = ADMIN_IDS[0] if ADMIN_IDS else None
 ALLOWED_CHATS = _read_int_list("ALLOWED_CHATS")
 
 if not API_HASH:

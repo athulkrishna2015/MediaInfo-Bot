@@ -3,9 +3,14 @@
 *.session-journal
 __pycache__/
 *.py[cod]
-tmp/*.temp
-probe_*.bin
 tmp/
+probe_*.bin
 .venv/
-.codex
+.codex/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+scratch.py

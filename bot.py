@@ -29,6 +29,7 @@ from pyrogram.errors import FloodWait, MessageNotModified, PeerIdInvalid
 
 from config import (
     ADMIN_ID,
+    ADMIN_IDS,
     ALLOWED_CHATS,
     API_HASH,
     API_ID,
@@ -86,7 +87,7 @@ TMP_DIR = "tmp"
 
 _NEVER_FILTER = filters.create(lambda _, __, ___: False)
 ALLOWED_CHAT_FILTER = filters.chat(ALLOWED_CHATS) if ALLOWED_CHATS else _NEVER_FILTER
-ADMIN_FILTER = filters.user(ADMIN_ID) if ADMIN_ID is not None else _NEVER_FILTER
+ADMIN_FILTER = filters.user(ADMIN_IDS) if ADMIN_IDS else _NEVER_FILTER
 
 VIDEO_STREAM_STEPS = (16 * 1024, 1 * 1024 * 1024, 3 * 1024 * 1024, 8 * 1024 * 1024)
 PHOTO_STREAM_STEPS = (128 * 1024,)
