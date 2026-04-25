@@ -756,7 +756,8 @@ def _build_audio_text(info: dict[str, Any]) -> str:
     labels = []
     for track in info.get("audio", []):
         language = get_full_language_name(str(track.get("language", "")))
-        labels.append("Original Audio" if language == "Unknown" else language)
+        if language != "Unknown":
+            labels.append(language)
 
     labels = _unique(labels)
     return ", ".join(labels)
