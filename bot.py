@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import uuid
 from collections import defaultdict
 from functools import lru_cache
@@ -55,7 +56,7 @@ app = Client(
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
     workers=6,
-    sleep_threshold=60,
+    sleep_threshold=300,
 )
 
 user_app = (
@@ -65,7 +66,7 @@ user_app = (
         api_hash=API_HASH,
         session_string=STRING_SESSION,
         workers=2,
-        sleep_threshold=60,
+        sleep_threshold=300,
     )
     if STRING_SESSION
     else None
@@ -84,6 +85,9 @@ EDIT_DELAY: float = EDIT_DELAY  # from config (default 1.5s, configurable via .e
 CAPTION_LIMIT = 1024
 MEDIA_GROUP_CACHE_TTL = 300.0
 
+_flood_wait_until: float = 0.0
+_flood_wait_lock = asyncio.Lock()
+
 scheduler = AsyncIOScheduler()
 TMP_DIR = "tmp"
 
@@ -97,8 +101,25 @@ MEDIA_INFO_LINE_RE = re.compile(r"(?m)^(?:<b>)?(?:[📸🎬📄]|\d+\.\s+.*[📸
 
 def _status_print(text: str) -> None:
     """Overwrite the current terminal line in-place (no scrolling spam)."""
+    if _loop_time() < _flood_wait_until:
+        return
     sys.stdout.write(f"\r\033[K{text}")
     sys.stdout.flush()
+
+
+async def _handle_flood_wait(exc_value: int):
+    """Synchronized handling of FloodWait to prevent log spam."""
+    global _flood_wait_until
+    async with _flood_wait_lock:
+        now = _loop_time()
+        if now < _flood_wait_until:
+            return
+        _flood_wait_until = now + exc_value + 2
+        logger.warning(
+            "⚡ FloodWait hit: Pausing for %ss (until %s)",
+            exc_value,
+            time.strftime("%H:%M:%S", time.localtime(_flood_wait_until)),
+        )
 
 
 def _loop_time() -> float:
@@ -889,6 +910,8 @@ async def _stream_chunk(client: Client, media: Any, size: int, path: str) -> boo
                     if written >= size:
                         break
         return os.path.exists(path) and os.path.getsize(path) > 0
+    except FloodWait:
+        raise
     except Exception as exc:
         logger.warning("stream_chunk failed (%s): %s", size, exc)
         return False
@@ -962,6 +985,9 @@ async def process_message(client: Client, message: Any, progress_msg: Any = None
                 break
 
             await _remove_path(tmp)
+        except FloodWait:
+            await _remove_path(tmp)
+            raise
         except Exception as exc:
             logger.warning("Sampling step failed for msg %s: %s", message.id, exc)
             await _remove_path(tmp)
@@ -1422,7 +1448,16 @@ async def _run_scan(admin_msg: Any, chat_id: Union[int, str], limit: int, offset
         file_path = None
         async with proc_sem:
             try:
+                # Check global flood wait before starting
+                now = _loop_time()
+                if now < _flood_wait_until:
+                    await asyncio.sleep(_flood_wait_until - now)
+
                 caption, file_path = await process_message(history_client, message, group=group)
+            except FloodWait as exc:
+                await _handle_flood_wait(exc.value)
+                counters["errors"] += 1
+                return
             except Exception as exc:
                 logger.error("Scan process error for %s: %s", message.id, exc)
                 counters["errors"] += 1
@@ -1449,6 +1484,13 @@ async def _run_scan(admin_msg: Any, chat_id: Union[int, str], limit: int, offset
 
             if not (message.video or message.document or message.photo or getattr(message, "animation", None) or getattr(message, "sticker", None)):
                 continue
+
+            # Check global flood wait in main loop
+            now = _loop_time()
+            if now < _flood_wait_until:
+                wait_time = _flood_wait_until - now
+                logger.info("Main scan loop waiting for FloodWait: %ss", int(wait_time))
+                await asyncio.sleep(wait_time)
 
             counters["scanned"] += 1
 
