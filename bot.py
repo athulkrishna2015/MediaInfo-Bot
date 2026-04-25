@@ -937,10 +937,13 @@ def _has_enough_info(info: dict[str, Any], *, is_photo: bool) -> bool:
     return bool(info.get("audio") or info.get("subtitle"))
 
 
-async def process_message(client: Client, message: Any, progress_msg: Any = None, group: Optional[list[Any]] = None) -> tuple[str, Optional[str]]:
+async def process_message(client: Client, message: Any, progress_msg: Any = None, group: Optional[list[Any]] = None, stream_client: Optional[Client] = None) -> tuple[str, Optional[str]]:
     media = message.video or message.document or message.photo or getattr(message, "animation", None) or getattr(message, "sticker", None)
     if not media:
         return "", None
+
+    # Use dedicated stream_client for media downloads if provided (avoids user account DC auth FloodWait)
+    _streamer = stream_client or client
 
     link = getattr(message, "link", None) or f"ID: {message.id}"
     _status_print(f"⚡ Processing: {link}")
@@ -973,7 +976,7 @@ async def process_message(client: Client, message: Any, progress_msg: Any = None
         tmp = _new_tmp_path("probe", message.id)
         try:
             await _update(f"🔍 Sampling {_human_size(limit)}…")
-            if not await _stream_chunk(client, media, limit, tmp):
+            if not await _stream_chunk(_streamer, media, limit, tmp):
                 await _remove_path(tmp)
                 continue
 
@@ -1422,27 +1425,27 @@ async def _run_scan(admin_msg: Any, chat_id: Union[int, str], limit: int, offset
             wait = EDIT_DELAY - (_loop_time() - last_edit_ts[0])
             if wait > 0:
                 await asyncio.sleep(wait)
-            try:
-                await history_client.edit_message_caption(chat_id, msg_id, caption, parse_mode=ParseMode.HTML)
-                counters["edited"] += 1
-            except MessageNotModified:
-                counters["skipped"] += 1
-            except FloodWait as exc:
-                logger.warning("Scan FloodWait: sleeping %ss", exc.value)
-                await asyncio.sleep(exc.value)
+            # Always try bot account first for edits, fallback to history_client
+            for edit_client in ([app, history_client] if history_client != app else [app]):
                 try:
-                    await history_client.edit_message_caption(chat_id, msg_id, caption, parse_mode=ParseMode.HTML)
+                    await edit_client.edit_message_caption(chat_id, msg_id, caption, parse_mode=ParseMode.HTML)
                     counters["edited"] += 1
+                    break
                 except MessageNotModified:
                     counters["skipped"] += 1
-                except Exception as retry_exc:
-                    logger.error("Retry edit failed for %s: %s", msg_id, retry_exc)
+                    break
+                except FloodWait as exc:
+                    await _handle_flood_wait(exc.value)
+                    await asyncio.sleep(exc.value)
+                    continue
+                except Exception as exc:
+                    if edit_client != history_client:
+                        logger.debug("Bot edit failed for %s, trying user helper: %s", msg_id, exc)
+                        continue
+                    logger.error("Edit failed for %s: %s", msg_id, exc)
                     counters["errors"] += 1
-            except Exception as exc:
-                logger.error("Edit failed for %s: %s", msg_id, exc)
-                counters["errors"] += 1
-            finally:
-                last_edit_ts[0] = _loop_time()
+            last_edit_ts[0] = _loop_time()
+
 
     async def _process_one(message: Any, group: Any) -> None:
         file_path = None
@@ -1453,7 +1456,7 @@ async def _run_scan(admin_msg: Any, chat_id: Union[int, str], limit: int, offset
                 if now < _flood_wait_until:
                     await asyncio.sleep(_flood_wait_until - now)
 
-                caption, file_path = await process_message(history_client, message, group=group)
+                caption, file_path = await process_message(history_client, message, stream_client=app, group=group)
             except FloodWait as exc:
                 await _handle_flood_wait(exc.value)
                 counters["errors"] += 1

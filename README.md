@@ -1,6 +1,6 @@
 # 🎬 MediaInfo Bot
 
-> A Telegram bot that enriches captions with media details like resolution, codec, duration, audio languages, and subtitles. It supports channels, groups, and private chats.
+> A Telegram bot that enriches captions with media details like resolution, codec, duration, audio languages, and subtitles. It supports channels, groups, topics, and private chats.
 
 **Made by [@piroxbots](https://t.me/piroxbots) · Bug reports: [@notyourpiro](https://t.me/notyourpiro)**
 
@@ -8,14 +8,20 @@
 
 - Progressive probing for videos: `16 KB` → `1 MB` → `3 MB` → `8 MB`
 - Rich caption output with resolution, codec, bit depth, HDR, duration, audio, and subtitle labels
+- Accurate resolution detection for vertical and ultrawide videos (uses shortest dimension)
 - `/info` fallback to full download when partial probing is not enough
-- Photo, video, and document support in private chats
+- Photo, video, document, animated WebP/GIF, and sticker support in private chats and channels
 - Photo captions use `📸` with dimensions like `480x270` instead of video-style `240p`
 - Empty audio/subtitle lines are omitted when no tracks are present
-- Existing captions are preserved, and filenames are appended for videos/documents when available
+- Existing captions are preserved; filenames are appended for videos/documents when available
 - Channel/group auto-editing for allowed chats only
+- Smart re-processing prevention: emoji-based detection skips already-captioned media
+- Gallery/album support with numbered file list including per-item size, resolution, and duration
 - Admin commands for server status, restart, update, shutdown, and history scans
-- Optional user-helper account via `STRING_SESSION` for history scans
+- Multi-admin support via `ADMIN_IDS` (comma-separated list)
+- Optional user-helper account via `STRING_SESSION` for history scans in restricted channels
+- Smart FloodWait handling: single warning log, global pause, no terminal spam
+- Bot account used for all media streaming and edits; user account only for history access
 - Config validation on startup with clear error messages
 
 ## Caption Output
@@ -30,12 +36,14 @@ movie.mkv
 💬 <b>English</b>
 ```
 
-Video with no audio/subtitle tracks:
+Album/gallery caption:
 
-```html
-<b>Sample Movie</b>
-movie.mkv
-🎬 <b>1080p HEVC 10bit HDR</b> | ⏳ <b>01:45:32</b>
+```
+User caption text
+
+1. clip1.mp4 (10.5 MiB | 🎬 1080p | ⏳ 00:00:18)
+2. clip2.mp4 (5.0 MiB | 🎬 720p | ⏳ 00:00:10)
+3. photo.jpg (690 KiB | 📸 1237x227)
 ```
 
 Photo with no text caption:
@@ -60,7 +68,7 @@ archive.zip
 - A bot token from [@BotFather](https://t.me/BotFather)
 - The bot must be an admin in every target channel you want it to edit
 
-The bot now checks for missing system dependencies and logs a clear warning. It does not try to install OS packages at runtime.
+The bot checks for missing system dependencies and logs a clear warning on startup. It does not try to install OS packages at runtime.
 
 ## Setup
 
@@ -77,7 +85,7 @@ cd MediaInfo-Bot
 pip install -r requirements.txt
 ```
 
-Install system packages too:
+Install system packages:
 
 ```bash
 sudo apt install ffmpeg mediainfo
@@ -91,9 +99,17 @@ An example file is included as `.env.example`.
 API_ID=your_api_id
 API_HASH=your_api_hash
 BOT_TOKEN=your_bot_token
+
+# Single admin (legacy)
 ADMIN_ID=your_telegram_user_id
+
+# Multiple admins (preferred)
+ADMIN_IDS=111111111,222222222
+
 ALLOWED_CHATS=-1001234567890,-1009876543210
-# STRING_SESSION=optional_user_session
+
+# Optional: user account session for scanning restricted channels
+# STRING_SESSION=your_session_string
 ```
 
 Configuration reference:
@@ -103,14 +119,19 @@ Configuration reference:
 | `API_ID` | Telegram API ID | Yes |
 | `API_HASH` | Telegram API hash | Yes |
 | `BOT_TOKEN` | Bot token | Yes |
-| `ADMIN_ID` | Telegram user ID allowed to run admin commands | Yes |
+| `ADMIN_IDS` | Comma-separated Telegram user IDs for admin commands | Yes* |
+| `ADMIN_ID` | Legacy single admin ID (used if `ADMIN_IDS` is not set) | Yes* |
 | `ALLOWED_CHATS` | Comma-separated chat IDs for auto-editing | No |
-| `STRING_SESSION` | Optional user account session for history-scan fallback | No |
-| `LOG_LEVEL` | Logging level | No |
-| `LOG_FORMAT` | Python logging format | No |
-| `GC_THRESHOLD_0` | GC threshold gen 0 | No |
-| `GC_THRESHOLD_1` | GC threshold gen 1 | No |
-| `GC_THRESHOLD_2` | GC threshold gen 2 | No |
+| `STRING_SESSION` | User account session for history-scan fallback | No |
+| `EDIT_DELAY` | Minimum seconds between caption edits (default: `1.5`) | No |
+| `SCAN_WORKERS` | Parallel workers during `/scan` (default: `4`) | No |
+| `LOG_LEVEL` | Logging level (default: `INFO`) | No |
+| `LOG_FORMAT` | Python logging format string | No |
+| `GC_THRESHOLD_0` | GC threshold gen 0 (default: `500`) | No |
+| `GC_THRESHOLD_1` | GC threshold gen 1 (default: `5`) | No |
+| `GC_THRESHOLD_2` | GC threshold gen 2 (default: `5`) | No |
+
+*At least one of `ADMIN_IDS` or `ADMIN_ID` is required.
 
 ### 4. Run
 
@@ -118,7 +139,7 @@ Configuration reference:
 python bot.py
 ```
 
-On startup the bot validates config, checks for `ffprobe`/`mediainfo`, connects to Telegram, sends a startup message to `ADMIN_ID`, and starts scheduled garbage collection.
+On startup the bot validates config, checks for `ffprobe`/`mediainfo`, connects to Telegram, and starts scheduled garbage collection.
 
 ## Docker
 
@@ -146,23 +167,30 @@ The Docker image installs both `ffmpeg` and `mediainfo`.
 | `/restart` | Restart the bot process |
 | `/update` | `git pull --ff-only`, install Python deps, then restart |
 | `/shutdown` | Stop the bot |
-| `/scan <chat_id> [limit] [offset_id]` | Scan older posts in a channel/group |
+| `/scan <chat_id_or_link> [limit] [offset_id]` | Scan older posts in a channel/group |
 | `/stopscan <chat_id>` | Stop a running scan |
 
 Scan examples:
 
-- `/scan -1001234567890`
-- `/scan -1001234567890 100`
-- `/scan -1001234567890 0 54321`
-- `/stopscan -1001234567890`
+```
+/scan -1001234567890
+/scan -1001234567890 100
+/scan -1001234567890 0 54321
+/scan https://t.me/c/1234567890/100
+/scan https://t.me/c/1234567890/50/100
+/stopscan -1001234567890
+```
+
+The `/scan` command accepts direct Telegram message links (including topic links). The scan starts from the linked message onwards. Scans run with `SCAN_WORKERS` parallel workers and use the bot account for all edits and media streaming.
 
 ## Notes
 
 - If `ALLOWED_CHATS` is empty, auto-editing for channels/groups is disabled, but private chat features still work.
-- History scans use the bot account first. If that fails and `STRING_SESSION` is configured, the bot falls back to the user helper account.
+- History scans use the bot account first. If the bot lacks history access and `STRING_SESSION` is configured, it falls back to the user helper for `get_chat_history` only. All media streaming and caption edits still use the bot account.
 - Generic documents get a lightweight size caption instead of media-track details.
 - Photos do not invent a filename line if Telegram does not provide one.
-- If a video/document already has a caption and also has a filename, both are shown.
+- FloodWait events are handled gracefully: a single warning is logged, all workers pause until the cooldown expires, and the terminal status line is suppressed during the wait.
+- Animated WebP files and stickers sent in channels are fully processed.
 
 ## Project Structure
 
