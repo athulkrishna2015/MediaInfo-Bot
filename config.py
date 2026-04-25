@@ -38,6 +38,18 @@ def _read_int_with_default(name: str, default: int) -> int:
         return default
 
 
+def _read_float_with_default(name: str, default: float) -> float:
+    raw = _read_env(name)
+    if not raw:
+        return default
+
+    try:
+        return float(raw)
+    except ValueError:
+        CONFIG_ERRORS.append(f"{name} must be a number.")
+        return default
+
+
 def _read_int_list(name: str) -> list[int]:
     raw = _read_env(name)
     if not raw:
@@ -87,6 +99,12 @@ GC_THRESHOLD = (
     _read_int_with_default("GC_THRESHOLD_1", 5),
     _read_int_with_default("GC_THRESHOLD_2", 5),
 )
+
+# Minimum seconds between caption edits (lower = faster, higher = safer vs FloodWait)
+EDIT_DELAY: float = _read_float_with_default("EDIT_DELAY", 1.5)
+
+# Number of messages processed concurrently during /scan
+SCAN_WORKERS: int = _read_int_with_default("SCAN_WORKERS", 4)
 
 DEFAULT_CAPTION_TEMPLATE = (
     "<b>{title}</b>\n\n"

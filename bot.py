@@ -36,9 +36,11 @@ from config import (
     BOT_TOKEN,
     CAPTION_TEMPLATE,
     DEFAULT_CAPTION_TEMPLATE,
+    EDIT_DELAY,
     GC_THRESHOLD,
     LOG_FORMAT,
     LOG_LEVEL,
+    SCAN_WORKERS,
     STRING_SESSION,
     validate_config,
 )
@@ -78,7 +80,7 @@ channel_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 media_group_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 last_edit_time: dict[int, float] = {}
 processed_media_groups: dict[str, float] = {}
-EDIT_DELAY = 3.5
+EDIT_DELAY: float = EDIT_DELAY  # from config (default 1.5s, configurable via .env)
 CAPTION_LIMIT = 1024
 MEDIA_GROUP_CACHE_TTL = 300.0
 
@@ -1375,15 +1377,61 @@ async def _run_scan(admin_msg: Any, chat_id: Union[int, str], limit: int, offset
 
     status = await admin_msg.reply_text(
         f"🔍 Starting scan of <code>{chat_id}</code> using "
-        f"{'<b>User Helper</b>' if history_client == user_app else '<b>Bot Account</b>'}…",
+        f"{'<b>User Helper</b>' if history_client == user_app else '<b>Bot Account</b>'}… "
+        f"({SCAN_WORKERS} workers)",
         parse_mode=ParseMode.HTML,
     )
 
-    scanned = 0
-    edited = 0
-    skipped = 0
-    errors = 0
+    counters = {"scanned": 0, "edited": 0, "skipped": 0, "errors": 0}
     scanned_media_groups: set[str] = set()
+
+    # Semaphore limits concurrent downloads/probes
+    proc_sem = asyncio.Semaphore(SCAN_WORKERS)
+    # Lock + timestamp ensure edits are serialized with minimum EDIT_DELAY between them
+    edit_lock = asyncio.Lock()
+    last_edit_ts: list[float] = [0.0]
+
+    async def _edit_with_delay(msg_id: int, caption: str) -> None:
+        async with edit_lock:
+            wait = EDIT_DELAY - (_loop_time() - last_edit_ts[0])
+            if wait > 0:
+                await asyncio.sleep(wait)
+            try:
+                await history_client.edit_message_caption(chat_id, msg_id, caption, parse_mode=ParseMode.HTML)
+                counters["edited"] += 1
+            except MessageNotModified:
+                counters["skipped"] += 1
+            except FloodWait as exc:
+                logger.warning("Scan FloodWait: sleeping %ss", exc.value)
+                await asyncio.sleep(exc.value)
+                try:
+                    await history_client.edit_message_caption(chat_id, msg_id, caption, parse_mode=ParseMode.HTML)
+                    counters["edited"] += 1
+                except MessageNotModified:
+                    counters["skipped"] += 1
+                except Exception as retry_exc:
+                    logger.error("Retry edit failed for %s: %s", msg_id, retry_exc)
+                    counters["errors"] += 1
+            except Exception as exc:
+                logger.error("Edit failed for %s: %s", msg_id, exc)
+                counters["errors"] += 1
+            finally:
+                last_edit_ts[0] = _loop_time()
+
+    async def _process_one(message: Any, group: Any) -> None:
+        file_path = None
+        async with proc_sem:
+            try:
+                caption, file_path = await process_message(history_client, message, group=group)
+            except Exception as exc:
+                logger.error("Scan process error for %s: %s", message.id, exc)
+                counters["errors"] += 1
+                return
+            finally:
+                await _remove_path(file_path)
+        await _edit_with_delay(message.id, caption)
+
+    pending: list[asyncio.Task] = []
 
     try:
         async for message in history_client.get_chat_history(chat_id, limit=limit or None, offset_id=offset_id or 0):
@@ -1397,59 +1445,37 @@ async def _run_scan(admin_msg: Any, chat_id: Union[int, str], limit: int, offset
                 message, group = await _get_media_group_target(history_client, message)
 
             if not _scan_active.get(chat_id_str, False):
-                await _safe_edit(
-                    status,
-                    f"🛑 Scan stopped.\n\n📊 Scanned: {scanned} | ✅ Edited: {edited} | ⏭ Skipped: {skipped} | ❌ Errors: {errors}",
-                    force=True,
-                )
-                return
+                break
 
             if not (message.video or message.document or message.photo or getattr(message, "animation", None) or getattr(message, "sticker", None)):
                 continue
 
-            scanned += 1
+            counters["scanned"] += 1
 
             if caption_has_media_info(message.caption or ""):
-                skipped += 1
-                if scanned % 25 == 0:
-                    await _safe_edit(
-                        status,
-                        f"🔍 Scanning… {scanned} checked | ✅ {edited} edited | ⏭ {skipped} skipped | ❌ {errors} errors",
-                    )
+                counters["skipped"] += 1
                 continue
 
-            file_path = None
-            try:
-                caption, file_path = await process_message(history_client, message, group=group)
-                await history_client.edit_message_caption(chat_id, message.id, caption, parse_mode=ParseMode.HTML)
-                edited += 1
-            except MessageNotModified:
-                skipped += 1
-            except FloodWait as exc:
-                logger.warning("Scan FloodWait: sleeping %ss", exc.value)
-                await asyncio.sleep(exc.value)
-                try:
-                    caption, file_path = await process_message(history_client, message, group=group)
-                    await history_client.edit_message_caption(chat_id, message.id, caption, parse_mode=ParseMode.HTML)
-                    edited += 1
-                except MessageNotModified:
-                    skipped += 1
-                except Exception as retry_exc:
-                    logger.error("Retry edit failed for %s: %s", message.id, retry_exc)
-                    errors += 1
-            except Exception as exc:
-                logger.error("Scan process error for %s: %s", message.id, exc)
-                errors += 1
-            finally:
-                await _remove_path(file_path)
+            pending.append(asyncio.create_task(_process_one(message, group)))
 
-            if scanned % 25 == 0:
+            if counters["scanned"] % 25 == 0:
                 await _safe_edit(
                     status,
-                    f"🔍 Scanning… {scanned} checked | ✅ {edited} edited | ⏭ {skipped} skipped | ❌ {errors} errors",
+                    f"🔍 Scanning… {counters['scanned']} checked | ✅ {counters['edited']} edited | ⏭ {counters['skipped']} skipped | ❌ {counters['errors']} errors",
                 )
 
-            await asyncio.sleep(EDIT_DELAY)
+        # Wait for all in-flight tasks to finish
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+        if not _scan_active.get(chat_id_str, False):
+            await _safe_edit(
+                status,
+                f"🛑 Scan stopped.\n\n📊 Scanned: {counters['scanned']} | ✅ Edited: {counters['edited']} | ⏭ Skipped: {counters['skipped']} | ❌ Errors: {counters['errors']}",
+                force=True,
+            )
+            return
+
     except FloodWait as exc:
         logger.warning("Scan history FloodWait: sleeping %ss", exc.value)
         await asyncio.sleep(exc.value)
@@ -1458,7 +1484,7 @@ async def _run_scan(admin_msg: Any, chat_id: Union[int, str], limit: int, offset
         await _safe_edit(
             status,
             f"❌ Scan error: <code>{html.escape(str(exc))}</code>\n\n"
-            f"📊 Scanned: {scanned} | ✅ Edited: {edited} | ⏭ Skipped: {skipped} | ❌ Errors: {errors}",
+            f"📊 Scanned: {counters['scanned']} | ✅ Edited: {counters['edited']} | ⏭ Skipped: {counters['skipped']} | ❌ Errors: {counters['errors']}",
             parse_mode=ParseMode.HTML,
             force=True,
         )
@@ -1466,7 +1492,7 @@ async def _run_scan(admin_msg: Any, chat_id: Union[int, str], limit: int, offset
     finally:
         await _safe_edit(
             status,
-            f"✅ <b>Scan Complete!</b>\n\n📊 Scanned: {scanned} | ✅ Edited: {edited} | ⏭ Skipped: {skipped} | ❌ Errors: {errors}",
+            f"✅ <b>Scan Complete!</b>\n\n📊 Scanned: {counters['scanned']} | ✅ Edited: {counters['edited']} | ⏭ Skipped: {counters['skipped']} | ❌ Errors: {counters['errors']}",
             parse_mode=ParseMode.HTML,
             force=True,
         )
