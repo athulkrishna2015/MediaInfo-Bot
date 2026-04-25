@@ -74,9 +74,12 @@ active_users: set[int] = set()
 _last_edit: dict[int, float] = {}
 channel_queues: dict[int, list[tuple[Any, str]]] = defaultdict(list)
 channel_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
+media_group_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 last_edit_time: dict[int, float] = {}
+processed_media_groups: dict[str, float] = {}
 EDIT_DELAY = 3.5
 CAPTION_LIMIT = 1024
+MEDIA_GROUP_CACHE_TTL = 300.0
 
 scheduler = AsyncIOScheduler()
 TMP_DIR = "tmp"
@@ -95,6 +98,13 @@ def _loop_time() -> float:
         return asyncio.get_running_loop().time()
     except RuntimeError:
         return asyncio.get_event_loop().time()
+
+
+def _prune_processed_media_groups() -> None:
+    now = _loop_time()
+    stale_groups = [group_id for group_id, ts in processed_media_groups.items() if now - ts > MEDIA_GROUP_CACHE_TTL]
+    for group_id in stale_groups:
+        processed_media_groups.pop(group_id, None)
 
 
 def _human_size(num: float, suffix: str = "B") -> str:
@@ -683,23 +693,36 @@ def _unique(values: list[str]) -> list[str]:
     return list(dict.fromkeys(value for value in values if value))
 
 
-def _build_title(message: Any, media: Any, *, is_photo: bool, is_video: bool) -> str:
+def _extract_text_and_files(message: Any, media: Any, *, is_photo: bool, is_video: bool, group: Optional[list[Any]] = None) -> tuple[str, str]:
     caption_text = (message.caption or "").strip()
-    file_name = (getattr(media, "file_name", None) or "").strip()
+    
+    file_names = []
+    if group:
+        for i, item in enumerate(group, start=1):
+            item_media = item.video or item.document or item.photo
+            if item_media:
+                name = (getattr(item_media, "file_name", None) or "").strip()
+                if not name:
+                    if item.photo:
+                        name = "Photo"
+                    elif item.video:
+                        name = "Video"
+                    else:
+                        name = "File"
+                file_names.append(f"{i}. {name}")
+    
+    file_name = "\n".join(file_names) if group else (getattr(media, "file_name", None) or "").strip()
 
-    if is_photo:
-        return caption_text
+    if caption_text and file_name and not group and caption_text == file_name:
+        file_name = ""
 
-    if caption_text and file_name and caption_text != file_name:
-        return f"{caption_text}\n{file_name}"
+    if not caption_text and not file_name:
+        if is_photo:
+            file_name = ""
+        else:
+            file_name = "Video" if is_video else "File"
 
-    if caption_text:
-        return caption_text
-
-    if file_name:
-        return file_name
-
-    return "Video" if is_video else "File"
+    return caption_text, file_name
 
 
 def _build_audio_text(info: dict[str, Any]) -> str:
@@ -740,19 +763,24 @@ def _render_caption_template(values: dict[str, str]) -> str:
         return DEFAULT_CAPTION_TEMPLATE.format(**values).strip()
 
 
-def _build_caption(message: Any, media: Any, info: dict[str, Any]) -> str:
+def _build_caption(message: Any, media: Any, info: dict[str, Any], group: Optional[list[Any]] = None) -> str:
     is_photo = _is_photo_message(message)
     is_video = _is_video_message(message)
-    raw_title = _build_title(message, media, is_photo=is_photo, is_video=is_video)
-    title = html.escape(raw_title)
+    raw_caption, raw_files = _extract_text_and_files(message, media, is_photo=is_photo, is_video=is_video, group=group)
+    
+    caption_text = html.escape(raw_caption)
+    file_list = html.escape(raw_files)
 
     merged_info = _merge_info(info, _base_info_from_message(message, media))
     size_value = merged_info.get("format", {}).get("size") or getattr(media, "file_size", 0) or 0
 
     if not (is_photo or is_video):
         info_block = f"📄 <b>{html.escape(_human_size(size_value))}</b>"
-        fallback = f"{title}\n{info_block}" if title else info_block
-        return _truncate(fallback, CAPTION_LIMIT)
+        lines = []
+        if caption_text: lines.append(f"<b>{caption_text}</b>")
+        lines.append(info_block)
+        if file_list: lines.append(f"<b>{file_list}</b>")
+        return _truncate("\n".join(lines), CAPTION_LIMIT)
 
     duration = merged_info.get("format", {}).get("duration") or getattr(media, "duration", 0) or 0
     media_emoji = "📸" if is_photo else "🎬"
@@ -761,8 +789,8 @@ def _build_caption(message: Any, media: Any, info: dict[str, Any]) -> str:
     subtitle_text = html.escape(_build_subtitle_text(merged_info))
 
     lines: list[str] = []
-    if title:
-        lines.append(f"<b>{title}</b>")
+    if caption_text:
+        lines.append(f"<b>{caption_text}</b>")
 
     primary_line = f"{media_emoji} <b>{video_line}</b>"
     if duration and not is_photo:
@@ -774,16 +802,19 @@ def _build_caption(message: Any, media: Any, info: dict[str, Any]) -> str:
     if subtitle_text:
         lines.append(f"💬 <b>{subtitle_text}</b>")
 
+    if file_list:
+        lines.append(f"<b>{file_list}</b>")
+
     caption = "\n".join(lines).strip()
     if len(caption) <= CAPTION_LIMIT:
         return caption
 
-    if title:
-        lines_without_title = lines[1:]
-        static_text = "\n".join(lines_without_title).strip()
-        available_title_len = max(CAPTION_LIMIT - len(static_text) - 6, 0)
-        truncated_title = _truncate(title, available_title_len)
-        lines = [f"<b>{truncated_title}</b>", *lines_without_title]
+    if len(caption) > CAPTION_LIMIT and caption_text:
+        lines_without_caption = lines[1:]
+        static_text = "\n".join(lines_without_caption).strip()
+        available_len = max(CAPTION_LIMIT - len(static_text) - 6, 0)
+        truncated_caption = _truncate(caption_text, available_len)
+        lines = [f"<b>{truncated_caption}</b>", *lines_without_caption]
         caption = "\n".join(lines).strip()
 
     if len(caption) > CAPTION_LIMIT:
@@ -797,7 +828,9 @@ def caption_has_media_info(caption: str) -> bool:
         return False
     if not MEDIA_INFO_LINE_RE.search(caption):
         return False
-    return any(token in caption for token in ("⏳", "🔊", "💬", "KiB", "MiB", "GiB"))
+    if any(token in caption for token in ("⏳", "🔊", "💬", "KiB", "MiB", "GiB", "TiB", "B</b>", "Media Info Unavailable")):
+        return True
+    return bool(re.search(r"[📸🎬]\s*(?:<b>)?\s*\d+(?:x\d+|p)", caption))
 
 
 async def _stream_chunk(client: Client, media: Any, size: int, path: str) -> bool:
@@ -842,7 +875,7 @@ def _has_enough_info(info: dict[str, Any], *, is_photo: bool) -> bool:
     return bool(info.get("audio") or info.get("subtitle"))
 
 
-async def process_message(client: Client, message: Any, progress_msg: Any = None) -> tuple[str, Optional[str]]:
+async def process_message(client: Client, message: Any, progress_msg: Any = None, group: Optional[list[Any]] = None) -> tuple[str, Optional[str]]:
     media = message.video or message.document or message.photo
     if not media:
         return "", None
@@ -852,11 +885,11 @@ async def process_message(client: Client, message: Any, progress_msg: Any = None
     base_info = _base_info_from_message(message, media)
 
     if message.photo:
-        return _build_caption(message, media, base_info), None
+        return _build_caption(message, media, base_info, group=group), None
 
     if not (is_photo or is_video):
         logger.info("Zero-download processing for msg %s (generic document)", message.id)
-        return _build_caption(message, media, base_info), None
+        return _build_caption(message, media, base_info, group=group), None
 
     async def _update(text: str) -> None:
         if progress_msg:
@@ -891,7 +924,7 @@ async def process_message(client: Client, message: Any, progress_msg: Any = None
             logger.warning("Sampling step failed for msg %s: %s", message.id, exc)
             await _remove_path(tmp)
 
-    return _build_caption(message, media, info), last_tmp
+    return _build_caption(message, media, info, group=group), last_tmp
 
 
 async def _safe_edit(msg: Any, text: str, parse_mode: Optional[ParseMode] = None, *, force: bool = False) -> None:
@@ -910,6 +943,25 @@ async def _safe_edit(msg: Any, text: str, parse_mode: Optional[ParseMode] = None
         pass
     except Exception:
         logger.debug("Failed to edit message %s", key, exc_info=True)
+
+
+async def _get_media_group_target(client: Client, message: Any) -> tuple[Any, Optional[list[Any]]]:
+    media_group_id = getattr(message, "media_group_id", None)
+    if not media_group_id:
+        return message, None
+
+    try:
+        group = await client.get_media_group(message.chat.id, message.id)
+    except Exception as exc:
+        logger.debug("Failed to fetch media group %s: %s", media_group_id, exc)
+        return message, None
+
+    if not group:
+        return message, None
+
+    sorted_group = sorted(group, key=lambda item: item.id)
+    caption_message = next((item for item in sorted_group if (item.caption or "").strip()), None)
+    return caption_message or sorted_group[0], sorted_group
 
 
 async def _process_channel_queue(channel_id: int) -> None:
@@ -945,17 +997,44 @@ async def _process_channel_queue(channel_id: int) -> None:
 
 @app.on_message((filters.video | filters.document | filters.photo) & (filters.channel | filters.group) & ALLOWED_CHAT_FILTER & ~filters.service)
 async def channel_handler(_, message: Any) -> None:
-    if caption_has_media_info(message.caption or ""):
+    media_group_id = getattr(message, "media_group_id", None)
+    if not media_group_id or message.document:
+        if caption_has_media_info(message.caption or ""):
+            return
+
+        caption, file_path = await process_message(app, message)
+        logger.info("Generated live caption for %s", message.id)
+
+        channel_id = message.chat.id
+        channel_queues[channel_id].append((message, caption))
+        asyncio.create_task(_process_channel_queue(channel_id))
+
+        await _remove_path(file_path)
         return
 
-    caption, file_path = await process_message(app, message)
-    logger.info("Generated live caption for %s", message.id)
+    await asyncio.sleep(1.0)
+    async with media_group_locks[str(media_group_id)]:
+        _prune_processed_media_groups()
+        if str(media_group_id) in processed_media_groups:
+            return
 
-    channel_id = message.chat.id
-    channel_queues[channel_id].append((message, caption))
-    asyncio.create_task(_process_channel_queue(channel_id))
+        target_message, group = await _get_media_group_target(app, message)
+        if target_message.id != message.id:
+            return
 
-    await _remove_path(file_path)
+        if caption_has_media_info(target_message.caption or ""):
+            processed_media_groups[str(media_group_id)] = _loop_time()
+            return
+
+        caption, file_path = await process_message(app, target_message, group=group)
+        logger.info("Generated gallery caption for %s (group %s)", target_message.id, media_group_id)
+
+        channel_id = target_message.chat.id
+        channel_queues[channel_id].append((target_message, caption))
+        processed_media_groups[str(media_group_id)] = _loop_time()
+        asyncio.create_task(_process_channel_queue(channel_id))
+
+        await _remove_path(file_path)
 
 
 @app.on_message(filters.private & (filters.video | filters.document | filters.photo))
@@ -1243,9 +1322,19 @@ async def _run_scan(admin_msg: Any, chat_id: int, limit: int, offset_id: int = 0
     edited = 0
     skipped = 0
     errors = 0
+    scanned_media_groups: set[str] = set()
 
     try:
         async for message in history_client.get_chat_history(chat_id, limit=limit or None, offset_id=offset_id or 0):
+            media_group_id = getattr(message, "media_group_id", None)
+            group = None
+            if media_group_id and not message.document:
+                media_group_key = str(media_group_id)
+                if media_group_key in scanned_media_groups:
+                    continue
+                scanned_media_groups.add(media_group_key)
+                message, group = await _get_media_group_target(history_client, message)
+
             if not _scan_active.get(chat_id, False):
                 await _safe_edit(
                     status,
@@ -1270,7 +1359,7 @@ async def _run_scan(admin_msg: Any, chat_id: int, limit: int, offset_id: int = 0
 
             file_path = None
             try:
-                caption, file_path = await process_message(history_client, message)
+                caption, file_path = await process_message(history_client, message, group=group)
                 await history_client.edit_message_caption(chat_id, message.id, caption, parse_mode=ParseMode.HTML)
                 edited += 1
             except MessageNotModified:
@@ -1279,7 +1368,7 @@ async def _run_scan(admin_msg: Any, chat_id: int, limit: int, offset_id: int = 0
                 logger.warning("Scan FloodWait: sleeping %ss", exc.value)
                 await asyncio.sleep(exc.value)
                 try:
-                    caption, file_path = await process_message(history_client, message)
+                    caption, file_path = await process_message(history_client, message, group=group)
                     await history_client.edit_message_caption(chat_id, message.id, caption, parse_mode=ParseMode.HTML)
                     edited += 1
                 except MessageNotModified:
