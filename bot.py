@@ -82,6 +82,27 @@ def _human_time(seconds):
         return f"{h:02d}:{m:02d}:{s:02d}"
     return f"{m:02d}:{s:02d}"
 
+async def aioremove(path: str):
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except Exception as e:
+        logger.warning(f"Error removing {path}: {e}")
+
+def _init_tmp():
+    if not os.path.exists(TMP_DIR):
+        os.makedirs(TMP_DIR)
+    else:
+        # Clear existing temp files on startup
+        for f in os.listdir(TMP_DIR):
+            try:
+                os.remove(os.path.join(TMP_DIR, f))
+            except:
+                pass
+    logger.info("Temporary directory initialized and cleared.")
+
+_init_tmp()
+
 
 _LANGUAGE_MAP: dict[str, str] = {
     'en': 'English',  'eng': 'English',
@@ -424,56 +445,52 @@ async def _stream_chunk(client, media, size: int, path: str) -> bool:
 
 
 async def process_message(client, message, progress_msg=None) -> tuple[str, Optional[str]]:
+    """Analyze media with minimal data usage. NEVER does full download."""
     media = message.video or message.document or message.photo
+    if not media:
+        return "", None
+
+    # 1. Type Detection
+    is_photo = message.photo or (message.document and message.document.mime_type and message.document.mime_type.startswith("image/"))
+    is_video = message.video or (message.document and message.document.mime_type and message.document.mime_type.startswith("video/"))
+    
+    # 2. No Download for Generic Documents
+    if not (is_photo or is_video):
+        logger.info(f"Zero-download processing for msg {message.id} (Document)")
+        return _build_caption(message, media, {}), None
 
     async def _update(text: str):
         if progress_msg:
             await _safe_edit(progress_msg, text)
-            await asyncio.sleep(0.3)
 
-    await _update("⚡ Fast scan (16 KB)…")
+    # 3. Step-wise probing (Stops early if info found)
+    steps = [128 * 1024] if is_photo else [16 * 1024, 1 * 1024 * 1024, 3 * 1024 * 1024, 8 * 1024 * 1024]
+    info = {}
+    last_tmp = None
 
-    for label, size in _STREAM_STEPS:
-        tmp = os.path.join(TMP_DIR, f"probe_{label}_{message.id}_{uuid.uuid4().hex[:8]}.bin")
+    for i, limit in enumerate(steps):
+        if limit > media.file_size:
+            limit = media.file_size
+            
+        tmp = os.path.join(TMP_DIR, f"probe_{message.id}_{uuid.uuid4().hex[:8]}.bin")
         try:
-            await _update(f"📦 Scanning {label}…")
-            ok = await _stream_chunk(client, media, size, tmp)
-            if not ok:
-                continue
-
-            result = await _probe(tmp)
-            _, w, h = result[0], result[1], result[2]
-            if w or h:
-                return _build_caption(message, media, result), None
-
+            await _update(f"🔍 Sampling {_human_size(limit)}…")
+            ok = await _stream_chunk(client, media, limit, tmp)
+            if ok:
+                info = await _probe(tmp)
+                # If we have video info (resolution), we can stop
+                if info.get("video"):
+                    last_tmp = tmp
+                    break
+            
+            if os.path.exists(tmp):
+                os.remove(tmp)
         except Exception as e:
-            logger.warning(f"{label} probe error: {e}")
-        finally:
+            logger.warning(f"Step {i+1} failed: {e}")
             if os.path.exists(tmp):
                 await aioremove(tmp)
 
-    await _update("⬇️ Full download (fallback)…")
-    try:
-        file_size = getattr(media, 'file_size', 0) or 0
-        if file_size > 2 * 1024 ** 3:
-            return message.caption or getattr(media, 'file_name', None) or 'Video', None
-
-        try:
-            download_path = os.path.join(TMP_DIR, getattr(media, 'file_name', f"{message.id}.bin") or f"{message.id}.bin")
-            file_path = await asyncio.wait_for(message.download(file_name=download_path), timeout=60)
-        except FloodWait as e:
-            await asyncio.sleep(e.value)
-            file_path = await message.download(file_name=download_path)
-
-        result = await _probe(file_path)
-        return _build_caption(message, media, result), file_path
-
-    except asyncio.TimeoutError:
-        logger.error("Full download timed out")
-    except Exception as e:
-        logger.error(f"Full download failed: {e}")
-
-    return message.caption or getattr(media, 'file_name', None) or 'Video', None
+    return _build_caption(message, media, info), last_tmp
 
 
 async def _safe_edit(msg, text: str, parse_mode=None):
