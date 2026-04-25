@@ -965,23 +965,6 @@ async def process_message(client: Client, message: Any, progress_msg: Any = None
     # Use dedicated stream_client for media downloads if provided
     _streamer = stream_client or client
 
-    # File references are session-specific — re-fetch via the streaming client
-    # to get a valid reference for that session, avoiding FILE_REFERENCE_EXPIRED
-    stream_media = media
-    if stream_client and stream_client != client:
-        try:
-            refreshed = await stream_client.get_messages(message.chat.id, message.id)
-            refreshed_media = (
-                refreshed.video or refreshed.document or refreshed.photo
-                or getattr(refreshed, "animation", None)
-                or getattr(refreshed, "sticker", None)
-            )
-            if refreshed_media:
-                stream_media = refreshed_media
-        except Exception as exc:
-            logger.debug("Could not refresh file reference via stream_client: %s — falling back to original", exc)
-            _streamer = client  # fall back to original client
-
     link = getattr(message, "link", None) or f"ID: {message.id}"
     _status_print(f"⚡ Processing: {link}")
 
@@ -1000,7 +983,7 @@ async def process_message(client: Client, message: Any, progress_msg: Any = None
         if progress_msg:
             await _safe_edit(progress_msg, text)
 
-    file_size = getattr(stream_media, "file_size", 0) or 0
+    file_size = getattr(media, "file_size", 0) or 0
     steps = PHOTO_STREAM_STEPS if is_photo else VIDEO_STREAM_STEPS
     info = base_info
     last_tmp = None
@@ -1013,7 +996,7 @@ async def process_message(client: Client, message: Any, progress_msg: Any = None
         tmp = _new_tmp_path("probe", message.id)
         try:
             await _update(f"🔍 Sampling {_human_size(limit)}…")
-            if not await _stream_chunk(_streamer, stream_media, limit, tmp):
+            if not await _stream_chunk(_streamer, media, limit, tmp):
                 await _remove_path(tmp)
                 continue
 
@@ -1493,7 +1476,7 @@ async def _run_scan(admin_msg: Any, chat_id: Union[int, str], limit: int, offset
                 if now < _flood_wait_until:
                     await asyncio.sleep(_flood_wait_until - now)
 
-                caption, file_path = await process_message(history_client, message, stream_client=app, group=group)
+                caption, file_path = await process_message(history_client, message, group=group)
             except FloodWait as exc:
                 await _handle_flood_wait(exc.value)
                 counters["errors"] += 1

@@ -104,7 +104,8 @@ GC_THRESHOLD = (
 EDIT_DELAY: float = _read_float_with_default("EDIT_DELAY", 1.5)
 
 # Number of messages processed concurrently during /scan
-SCAN_WORKERS: int = _read_int_with_default("SCAN_WORKERS", 4)
+# Keep low (1-2) when using a user account for streaming to avoid DC auth FloodWait
+SCAN_WORKERS: int = _read_int_with_default("SCAN_WORKERS", 2)
 
 DEFAULT_CAPTION_TEMPLATE = (
     "<b>{title}</b>\n\n"
