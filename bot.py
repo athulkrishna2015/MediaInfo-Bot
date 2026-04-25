@@ -645,7 +645,7 @@ async def _probe(path: str) -> dict[str, Any]:
     return _merge_info(ffprobe_info, mediainfo_info)
 
 
-def _build_video_line(info: dict[str, Any]) -> str:
+def _build_video_line(info: dict[str, Any], *, is_photo: bool = False) -> str:
     tracks = info.get("video", [])
     if not tracks:
         return "Media Info Unavailable"
@@ -655,22 +655,26 @@ def _build_video_line(info: dict[str, Any]) -> str:
     width = _parse_int(track.get("width"))
     parts: list[str] = []
 
-    resolution = get_standard_resolution(height)
-    if resolution:
-        parts.append(resolution)
-    elif width and height:
+    if is_photo and width and height:
         parts.append(f"{width}x{height}")
+    else:
+        resolution = get_standard_resolution(height)
+        if resolution:
+            parts.append(resolution)
+        elif width and height:
+            parts.append(f"{width}x{height}")
 
-    video_format = get_video_format(
-        str(track.get("codec", "")),
-        str(track.get("transfer", "")),
-        str(track.get("hdr", "")),
-        str(track.get("bit_depth", "")),
-    )
-    if video_format:
-        parts.append(video_format)
-    elif track.get("codec"):
-        parts.append(str(track["codec"]).upper())
+    if not is_photo:
+        video_format = get_video_format(
+            str(track.get("codec", "")),
+            str(track.get("transfer", "")),
+            str(track.get("hdr", "")),
+            str(track.get("bit_depth", "")),
+        )
+        if video_format:
+            parts.append(video_format)
+        elif track.get("codec"):
+            parts.append(str(track["codec"]).upper())
 
     return " ".join(part for part in parts if part).strip() or "Media Info Unavailable"
 
@@ -679,16 +683,33 @@ def _unique(values: list[str]) -> list[str]:
     return list(dict.fromkeys(value for value in values if value))
 
 
-def _build_audio_text(info: dict[str, Any], *, is_photo: bool) -> str:
+def _build_title(message: Any, media: Any, *, is_photo: bool, is_video: bool) -> str:
+    caption_text = (message.caption or "").strip()
+    file_name = (getattr(media, "file_name", None) or "").strip()
+
+    if is_photo:
+        return caption_text
+
+    if caption_text and file_name and caption_text != file_name:
+        return f"{caption_text}\n{file_name}"
+
+    if caption_text:
+        return caption_text
+
+    if file_name:
+        return file_name
+
+    return "Video" if is_video else "File"
+
+
+def _build_audio_text(info: dict[str, Any]) -> str:
     labels = []
     for track in info.get("audio", []):
         language = get_full_language_name(str(track.get("language", "")))
         labels.append("Original Audio" if language == "Unknown" else language)
 
     labels = _unique(labels)
-    if labels:
-        return ", ".join(labels)
-    return "No Audio" if is_photo else "Original Audio"
+    return ", ".join(labels)
 
 
 def _build_subtitle_text(info: dict[str, Any]) -> str:
@@ -698,7 +719,7 @@ def _build_subtitle_text(info: dict[str, Any]) -> str:
         labels.append("SUB" if language == "Unknown" else language)
 
     labels = _unique(labels)
-    return ", ".join(labels) if labels else "No Sub"
+    return ", ".join(labels)
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -722,34 +743,48 @@ def _render_caption_template(values: dict[str, str]) -> str:
 def _build_caption(message: Any, media: Any, info: dict[str, Any]) -> str:
     is_photo = _is_photo_message(message)
     is_video = _is_video_message(message)
-    default_title = getattr(media, "file_name", None) or ("Photo" if is_photo else "Video" if is_video else "File")
-    title = html.escape((message.caption or default_title).strip() or default_title)
+    raw_title = _build_title(message, media, is_photo=is_photo, is_video=is_video)
+    title = html.escape(raw_title)
 
     merged_info = _merge_info(info, _base_info_from_message(message, media))
     size_value = merged_info.get("format", {}).get("size") or getattr(media, "file_size", 0) or 0
 
     if not (is_photo or is_video):
         info_block = f"📄 <b>{html.escape(_human_size(size_value))}</b>"
-        fallback = f"{title}\n\n{info_block}"
+        fallback = f"{title}\n{info_block}" if title else info_block
         return _truncate(fallback, CAPTION_LIMIT)
 
     duration = merged_info.get("format", {}).get("duration") or getattr(media, "duration", 0) or 0
-    values = {
-        "title": title,
-        "video_line": html.escape(_build_video_line(merged_info)),
-        "duration": html.escape(_fmt_duration(duration) if duration else "Unknown"),
-        "audio": html.escape(_build_audio_text(merged_info, is_photo=is_photo)),
-        "subtitle": html.escape(_build_subtitle_text(merged_info)),
-    }
+    media_emoji = "📸" if is_photo else "🎬"
+    video_line = html.escape(_build_video_line(merged_info, is_photo=is_photo))
+    audio_text = html.escape(_build_audio_text(merged_info))
+    subtitle_text = html.escape(_build_subtitle_text(merged_info))
 
-    caption = _render_caption_template(values)
+    lines: list[str] = []
+    if title:
+        lines.append(f"<b>{title}</b>")
+
+    primary_line = f"{media_emoji} <b>{video_line}</b>"
+    if duration and not is_photo:
+        primary_line += f" | ⏳ <b>{html.escape(_fmt_duration(duration))}</b>"
+    lines.append(primary_line)
+
+    if audio_text:
+        lines.append(f"🔊 <b>{audio_text}</b>")
+    if subtitle_text:
+        lines.append(f"💬 <b>{subtitle_text}</b>")
+
+    caption = "\n".join(lines).strip()
     if len(caption) <= CAPTION_LIMIT:
         return caption
 
-    template_without_title = _render_caption_template({**values, "title": ""})
-    available_title_len = max(CAPTION_LIMIT - len(template_without_title), 0)
-    values["title"] = _truncate(title, available_title_len)
-    caption = _render_caption_template(values)
+    if title:
+        lines_without_title = lines[1:]
+        static_text = "\n".join(lines_without_title).strip()
+        available_title_len = max(CAPTION_LIMIT - len(static_text) - 6, 0)
+        truncated_title = _truncate(title, available_title_len)
+        lines = [f"<b>{truncated_title}</b>", *lines_without_title]
+        caption = "\n".join(lines).strip()
 
     if len(caption) > CAPTION_LIMIT:
         logger.warning("Caption too long for msg %s, truncating final output.", getattr(message, "id", "?"))
