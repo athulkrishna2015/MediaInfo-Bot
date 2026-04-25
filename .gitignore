@@ -3,4 +3,5 @@
 *.session-journal
 __pycache__/
 *.py[cod]
-tmp/
+tmp/*.temp
+probe_*.bin
