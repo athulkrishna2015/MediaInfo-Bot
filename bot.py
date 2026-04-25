@@ -90,7 +90,7 @@ ADMIN_FILTER = filters.user(ADMIN_ID) if ADMIN_ID is not None else _NEVER_FILTER
 
 VIDEO_STREAM_STEPS = (16 * 1024, 1 * 1024 * 1024, 3 * 1024 * 1024, 8 * 1024 * 1024)
 PHOTO_STREAM_STEPS = (128 * 1024,)
-MEDIA_INFO_LINE_RE = re.compile(r"(?m)^(?:<b>)?(?:[📸🎬📄]|\d+\.\s+).*$")
+MEDIA_INFO_LINE_RE = re.compile(r"(?m)^(?:<b>)?(?:[📸🎬📄]|\d+\.\s+.*[📸🎬📄]).*$")
 
 
 def _loop_time() -> float:
