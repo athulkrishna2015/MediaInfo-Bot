@@ -465,12 +465,14 @@ def _merge_info(primary: Optional[dict[str, Any]], fallback: Optional[dict[str, 
 def _is_photo_message(message: Any) -> bool:
     if message.photo:
         return True
+    if getattr(message, "sticker", None):
+        return True
     mime_type = (getattr(message.document, "mime_type", "") or "").lower()
     return mime_type.startswith("image/")
 
 
 def _is_video_message(message: Any) -> bool:
-    if message.video:
+    if getattr(message, "video", None) or getattr(message, "animation", None):
         return True
     mime_type = (getattr(message.document, "mime_type", "") or "").lower()
     return mime_type.startswith("video/")
@@ -905,7 +907,7 @@ def _has_enough_info(info: dict[str, Any], *, is_photo: bool) -> bool:
 
 
 async def process_message(client: Client, message: Any, progress_msg: Any = None, group: Optional[list[Any]] = None) -> tuple[str, Optional[str]]:
-    media = message.video or message.document or message.photo
+    media = message.video or message.document or message.photo or getattr(message, "animation", None) or getattr(message, "sticker", None)
     if not media:
         return "", None
 
@@ -1027,7 +1029,7 @@ async def _process_channel_queue(channel_id: int) -> None:
                 logger.error("Edit failed for %s: %s", message.id, exc)
 
 
-@app.on_message((filters.video | filters.document | filters.photo) & (filters.channel | filters.group) & ALLOWED_CHAT_FILTER & ~filters.service)
+@app.on_message((filters.video | filters.document | filters.photo | filters.animation | filters.sticker) & (filters.channel | filters.group) & ALLOWED_CHAT_FILTER & ~filters.service)
 async def channel_handler(_, message: Any) -> None:
     media_group_id = getattr(message, "media_group_id", None)
     if not media_group_id or message.document:
@@ -1069,7 +1071,7 @@ async def channel_handler(_, message: Any) -> None:
         await _remove_path(file_path)
 
 
-@app.on_message(filters.private & (filters.video | filters.document | filters.photo))
+@app.on_message(filters.private & (filters.video | filters.document | filters.photo | filters.animation | filters.sticker))
 async def private_handler(_, message: Any) -> None:
     user_id = getattr(message.from_user, "id", None)
     if user_id is None:
@@ -1396,7 +1398,7 @@ async def _run_scan(admin_msg: Any, chat_id: Union[int, str], limit: int, offset
                 )
                 return
 
-            if not (message.video or message.document or message.photo):
+            if not (message.video or message.document or message.photo or getattr(message, "animation", None) or getattr(message, "sticker", None)):
                 continue
 
             scanned += 1
