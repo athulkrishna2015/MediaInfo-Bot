@@ -1,4 +1,11 @@
 import asyncio
+
+# Fix for Python 3.12+ / 3.14 RuntimeError: No current event loop
+try:
+    asyncio.get_event_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
 import json
 import subprocess
 import os
@@ -16,10 +23,10 @@ from pyrogram.enums import ParseMode
 from functools import lru_cache
 from typing import Optional
 from aiofiles.os import remove as aioremove
-from pyrogram.errors import MessageNotModified, FloodWait
+from pyrogram.errors import MessageNotModified, FloodWait, PeerIdInvalid
 from collections import defaultdict
 from config import (
-    API_ID, API_HASH, BOT_TOKEN,
+    API_ID, API_HASH, BOT_TOKEN, STRING_SESSION,
     ADMIN_ID, ALLOWED_CHATS,
     LOG_FORMAT, LOG_LEVEL,
     GC_THRESHOLD,
@@ -39,6 +46,15 @@ app = Client(
     sleep_threshold=60,
 )
 
+user_app = Client(
+    "MediaInfo-User",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    session_string=STRING_SESSION,
+    workers=2,
+    sleep_threshold=60,
+) if STRING_SESSION else None
+
 stream_semaphore  = asyncio.Semaphore(4)
 channel_semaphore = asyncio.Semaphore(3)
 active_users: set = set()
@@ -50,6 +66,21 @@ last_edit_time:  dict[int, float] = {}
 EDIT_DELAY = 3.5
 
 scheduler = AsyncIOScheduler()
+TMP_DIR   = "tmp"
+
+def _human_size(num, suffix='B'):
+    for unit in ['', 'Ki', 'Mi', 'Gi', 'Ti', 'Pi', 'Ei', 'Zi']:
+        if abs(num) < 1024.0:
+            return f"{num:3.1f} {unit}{suffix}"
+        num /= 1024.0
+    return f"{num:.1f} Yi{suffix}"
+
+def _human_time(seconds):
+    m, s = divmod(int(seconds), 60)
+    h, m = divmod(m, 60)
+    if h > 0:
+        return f"{h:02d}:{m:02d}:{s:02d}"
+    return f"{m:02d}:{s:02d}"
 
 
 _LANGUAGE_MAP: dict[str, str] = {
@@ -246,208 +277,120 @@ async def _run_mediainfo(path: str) -> dict:
         return {}
 
 
-async def _run_ffprobe_full(path: str) -> dict:
+# Obsolete legacy functions removed
+async def _probe(path: str) -> dict:
+    """Analyze media file and return metadata dictionary."""
     try:
-        proc = await asyncio.create_subprocess_shell(
-            f'ffprobe -v error -show_streams -show_format -of json "{path}"',
+        if not os.path.exists(path):
+            return {}
+            
+        cmd = [
+            "ffprobe", "-v", "quiet",
+            "-print_format", "json",
+            "-show_format", "-show_streams",
+            path
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
         )
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=8)
-        return json.loads(out.decode() or '{}')
+        stdout, _ = await proc.communicate()
+        if not stdout:
+            return {}
+            
+        data = json.loads(stdout)
+        streams = data.get("streams", [])
+        
+        info = {
+            "format": data.get("format", {}),
+            "video": [s for s in streams if s.get("codec_type") == "video"],
+            "audio": [s for s in streams if s.get("codec_type") == "audio"],
+            "subtitle": [s for s in streams if s.get("codec_type") == "subtitle"]
+        }
+        return info
     except Exception as e:
-        logger.warning(f"ffprobe error: {e}")
+        logger.error(f"Probe error: {e}")
         return {}
 
 
-def _parse_ffprobe(data: dict) -> tuple:
-    streams  = data.get('streams', [])
-    fmt      = data.get('format',  {})
+def _build_caption(message, media, info: dict) -> str:
+    """Compose the final HTML caption, preserving the original."""
+    # Robust type detection
+    is_photo = False
+    is_video = False
+    default_name = "File"
 
-    duration  = 0.0
-    width = height = None
-    codec = bit_depth = hdr = transfer = ''
-    audio_langs: set[str] = set()
-    sub_langs:   set[str] = set()
-    has_sub = False
+    if message.photo:
+        is_photo = True
+        default_name = "Photo"
+    elif message.video:
+        is_video = True
+        default_name = "Video"
+    elif message.document:
+        mime = message.document.mime_type or ""
+        if mime.startswith("image/"):
+            is_photo = True
+            default_name = "Photo"
+        elif mime.startswith("video/"):
+            is_video = True
+            default_name = "Video"
+        else:
+            default_name = getattr(media, 'file_name', 'File') or 'File'
+    
+    orig_caption = message.caption or default_name
+    size_str = _human_size(getattr(media, 'file_size', 0))
 
-    dur_raw = fmt.get('duration') or ''
-    if dur_raw:
-        duration = _parse_duration(dur_raw)
+    v_tracks = info.get("video", [])
+    a_tracks = info.get("audio", [])
+    s_tracks = info.get("subtitle", [])
 
-    for s in streams:
-        ctype = (s.get('codec_type') or '').lower()
-        tags  = s.get('tags') or {}
+    # Resolution & Duration line
+    res_dur = []
+    if v_tracks:
+        v = v_tracks[0]
+        emoji = "📸" if is_photo else "🎬"
+        res_dur.append(f"{emoji} {v.get('width','?')}x{v.get('height','?')}")
+    
+    duration = info.get("format", {}).get("duration")
+    if duration:
+        res_dur.append(f"⏳ {_human_time(float(duration))}")
+    
+    # If no res/dur, use the File emoji with size
+    header = " | ".join(res_dur) if res_dur else f"📄 {size_str}"
 
-        if ctype == 'video':
-            if not width:
-                width  = s.get('width')  or s.get('coded_width')
-            if not height:
-                height = s.get('height') or s.get('coded_height')
+    info_lines = [
+        "", # Spacer
+        f"<b>{header}</b>"
+    ]
 
-            codec_raw = (s.get('codec_name') or '').lower()
-            if   'hevc' in codec_raw or 'h265' in codec_raw: codec = 'hevc'
-            elif 'h264' in codec_raw or 'avc'  in codec_raw: codec = 'avc'
-            elif 'av1'  in codec_raw:                          codec = 'av1'
-            elif 'vp9'  in codec_raw:                          codec = 'vp9'
-            elif 'mpeg4' in codec_raw or 'xvid' in codec_raw: codec = 'mpeg4'
-            else: codec = codec_raw
+    # Only add audio/subs if they exist
+    if a_tracks:
+        audio_info = ", ".join(list(dict.fromkeys(
+            [f"{t.get('language', 'Unknown').upper()} ({t.get('codec', 'Audio')})" for t in a_tracks]
+        )))
+        info_lines.append(f"🔊 {audio_info}")
 
-            bps = str(s.get('bits_per_raw_sample') or s.get('bits_per_coded_sample') or '')
-            if bps.isdigit() and bps != '0':
-                bit_depth = bps
+    if s_tracks:
+        sub_info = ", ".join(list(dict.fromkeys(
+            [t.get('language', 'Unknown').upper() for t in s_tracks]
+        )))
+        info_lines.append(f"💬 {sub_info}")
 
-            ct = (s.get('color_transfer') or '').lower()
-            cs = (s.get('color_space')    or '').lower()
-            if any(x in ct for x in ('smpte2084', 'arib-std-b67', 'smpte428')):
-                hdr = 'HDR'
-            elif 'bt2020' in cs and not hdr:
-                hdr = 'HDR'
+    media_info = "\n".join(info_lines)
+    
+    # Ensure total length doesn't exceed Telegram's 1024 char limit
+    # If it's too long, we prioritize the original caption and skip the info.
+    if len(orig_caption) + len(media_info) + 1 > 1024:
+        logger.warning(f"Caption too long for msg {message.id}, skipping media info.")
+        return orig_caption
 
-            if not duration:
-                d = tags.get('DURATION') or tags.get('duration') or ''
-                if d:
-                    duration = _parse_duration(d)
-
-        elif ctype == 'audio':
-            lang = tags.get('language') or tags.get('LANGUAGE') or ''
-            audio_langs.add(get_full_language_name(lang or 'unknown'))
-
-        elif ctype == 'subtitle':
-            has_sub = True
-            lang = tags.get('language') or tags.get('LANGUAGE') or ''
-            if lang:
-                sub_langs.add(get_full_language_name(lang))
-
-    audio_str = ', '.join(sorted(audio_langs)) if audio_langs else 'Original Audio'
-    if sub_langs:
-        sub_str = ', '.join(sorted(sub_langs))
-    elif has_sub:
-        sub_str = 'ESUB'
-    else:
-        sub_str = 'No Esubs'
-
-    return duration, width, height, codec, bit_depth, hdr, transfer, audio_str, sub_str
-
-
-def _parse_tracks(tracks: list) -> tuple:
-    duration  = 0.0
-    width = height = None
-    codec = bit_depth = hdr = transfer = ''
-    audio_langs: set[str] = set()
-    sub_langs:   set[str] = set()
-
-    for track in tracks:
-        if not isinstance(track, dict):
-            continue
-        t = (track.get('@type', '') or '').lower()
-
-        if t == 'general':
-            if not duration:
-                duration = _parse_duration(track.get('Duration'))
-
-        elif _is_video_track(track):
-            for field in ('Height', 'Sampled_Height', 'Encoded_Height'):
-                raw = str(track.get(field, '') or '').split()[0]
-                if raw.isdigit():
-                    height = int(raw)
-                    break
-
-            for field in ('Width', 'Sampled_Width', 'Encoded_Width'):
-                raw = str(track.get(field, '') or '').split()[0]
-                if raw.isdigit():
-                    width = int(raw)
-                    break
-
-            codec     = (track.get('Format', '') or '').lower()
-            bit_depth = track.get('BitDepth', '') or ''
-            transfer  = (track.get('transfer_characteristics', '') or
-                         track.get('TransferCharacteristics', '') or '').lower()
-            hdr       = (track.get('HDR_Format', '') or
-                         track.get('HDR_Format_Compatibility', '') or '')
-
-            if not duration:
-                duration = _parse_duration(track.get('Duration'))
-
-            track_str = str(track).lower()
-            if 'dolby vision' in track_str:
-                hdr = 'Dolby Vision'
-            elif 'hdr' in track_str and not hdr:
-                hdr = 'HDR'
-
-        elif t == 'audio':
-            lang = None
-            for field in ('Language', 'Language_String', 'Title'):
-                v = track.get(field)
-                if v:
-                    lang = v
-                    break
-            audio_langs.add(get_full_language_name(lang or 'unknown'))
-
-        elif t in ('text', 'menu', 'subtitle'):
-            lang = track.get('Language') or track.get('Language_String') or 'unknown'
-            sub_langs.add(get_full_language_name(lang))
-
-    audio_str = ', '.join(sorted(audio_langs)) if audio_langs else 'Original Audio'
-    sub_str   = ', '.join(sorted(sub_langs))   if sub_langs   else (
-                    'ESUB' if _has_subtitles(tracks) else 'No Esubs')
-
-    return duration, width, height, codec, bit_depth, hdr, transfer, audio_str, sub_str
-
-
-async def _probe(path: str) -> tuple:
-    mi_data = await _run_mediainfo(path)
-    tracks  = mi_data.get('media', {}).get('track', [])
-    mi      = _parse_tracks(tracks)
-    mi_dur, mi_w, mi_h = mi[0], mi[1], mi[2]
-
-    fp_data = await _run_ffprobe_full(path)
-    fp      = _parse_ffprobe(fp_data) if fp_data else None
-
-    if fp is None:
-        return mi
-
-    fp_dur, fp_w, fp_h = fp[0], fp[1], fp[2]
-
-    duration  = mi_dur or fp_dur
-    width     = mi_w   or fp_w
-    height    = mi_h   or fp_h
-    codec     = mi[3]  or fp[3]
-    bit_depth = mi[4]  or fp[4]
-    hdr       = mi[5]  or fp[5]
-    transfer  = mi[6]  or fp[6]
-    audio     = mi[7] if mi[7] != 'Unknown' else fp[7]
-    subtitle  = mi[8] if mi[8] != 'No Sub'  else fp[8]
-
-    return duration, width, height, codec, bit_depth, hdr, transfer, audio, subtitle
-
-
-def _build_caption(message, media, result: tuple) -> str:
-    duration, width, height, codec, bit_depth, hdr, transfer, audio, sub = result
-
-    quality     = get_standard_resolution(min(w for w in (width, height) if w) if width and height else (height or width or 0))
-    fmt         = get_video_format(codec, transfer, hdr, bit_depth)
-    video_line  = ' '.join(filter(None, [quality, fmt])) or 'Unknown'
-
-    return CAPTION_TEMPLATE.format(
-        title     = message.caption or getattr(media, 'file_name', None) or 'Video',
-        video_line= video_line,
-        duration  = _fmt_duration(duration) if duration else 'Unknown',
-        audio     = audio,
-        subtitle  = sub,
-    )
-
-
+    return f"{orig_caption}\n{media_info}"
 def caption_has_media_info(caption: str) -> bool:
     if not caption:
         return False
-    hits = (
-        bool(re.search(r'🎬', caption)),
-        bool(re.search(r'⏳\s*\d{2}:\d{2}:\d{2}', caption)),
-        bool(re.search(r'🔊', caption)),
-        bool(re.search(r'💬', caption)),
-    )
-    return sum(hits) >= 2
+    # Check for any of our "fingerprint" emojis
+    return any(e in caption for e in ["🎬", "⏳", "📄", "📸", "📦"])
 
 
 _STREAM_STEPS = [
@@ -458,12 +401,12 @@ _STREAM_STEPS = [
 ]
 
 
-async def _stream_chunk(media, size: int, path: str) -> bool:
+async def _stream_chunk(client, media, size: int, path: str) -> bool:
     try:
         written = 0
         async with stream_semaphore:
             async with aiopen(path, 'wb') as f:
-                async for chunk in app.stream_media(media):
+                async for chunk in client.stream_media(media):
                     if not chunk:
                         break
                     remaining = size - written
@@ -480,8 +423,8 @@ async def _stream_chunk(media, size: int, path: str) -> bool:
         return False
 
 
-async def process_message(message, progress_msg=None) -> tuple[str, Optional[str]]:
-    media = message.video or message.document
+async def process_message(client, message, progress_msg=None) -> tuple[str, Optional[str]]:
+    media = message.video or message.document or message.photo
 
     async def _update(text: str):
         if progress_msg:
@@ -491,10 +434,10 @@ async def process_message(message, progress_msg=None) -> tuple[str, Optional[str
     await _update("⚡ Fast scan (16 KB)…")
 
     for label, size in _STREAM_STEPS:
-        tmp = f"probe_{label}_{message.id}_{uuid.uuid4().hex[:8]}.bin"
+        tmp = os.path.join(TMP_DIR, f"probe_{label}_{message.id}_{uuid.uuid4().hex[:8]}.bin")
         try:
             await _update(f"📦 Scanning {label}…")
-            ok = await _stream_chunk(media, size, tmp)
+            ok = await _stream_chunk(client, media, size, tmp)
             if not ok:
                 continue
 
@@ -516,10 +459,11 @@ async def process_message(message, progress_msg=None) -> tuple[str, Optional[str
             return message.caption or getattr(media, 'file_name', None) or 'Video', None
 
         try:
-            file_path = await asyncio.wait_for(message.download(), timeout=60)
+            download_path = os.path.join(TMP_DIR, getattr(media, 'file_name', f"{message.id}.bin") or f"{message.id}.bin")
+            file_path = await asyncio.wait_for(message.download(file_name=download_path), timeout=60)
         except FloodWait as e:
             await asyncio.sleep(e.value)
-            file_path = await message.download()
+            file_path = await message.download(file_name=download_path)
 
         result = await _probe(file_path)
         return _build_caption(message, media, result), file_path
@@ -570,15 +514,13 @@ async def _process_channel_queue(channel_id: int):
                 logger.error(f"Edit failed: {e}")
 
 
-@app.on_message(
-    filters.chat(ALLOWED_CHATS) & filters.channel &
-    (filters.video | filters.document)
-)
+@app.on_message((filters.video | filters.document | filters.photo) & (filters.channel | filters.group) & filters.chat(ALLOWED_CHATS) & ~filters.service)
 async def channel_handler(_, message):
     if caption_has_media_info(message.caption or ''):
         return
-
-    caption, file_path = await process_message(message)
+        
+    caption, file_path = await process_message(app, message)
+    logger.info(f"Generated live caption: {caption}")
 
     channel_id = message.chat.id
     channel_queues[channel_id].append((message, caption))
@@ -605,7 +547,7 @@ async def _handle_private(message):
     try:
         await asyncio.sleep(0.5)
         progress_msg = await message.reply_text("⏳ Processing…")
-        caption, file_path = await process_message(message, progress_msg)
+        caption, file_path = await process_message(app, message, progress_msg)
         try:
             await _safe_edit(progress_msg, caption, parse_mode=ParseMode.HTML)
         except MessageNotModified:
@@ -621,15 +563,16 @@ async def _handle_private(message):
 @app.on_message(filters.command("info") & filters.reply)
 async def info_command(_, message):
     reply = message.reply_to_message
-    if not (reply and (reply.video or reply.document)):
-        return await message.reply_text("⚠️ Reply to a video or document.")
+    if not reply or not (reply.video or reply.document or reply.photo):
+        return await message.reply_text("⚠️ Reply to a video, photo or document.")
 
-    media = reply.video or reply.document
-    tmp   = f"info_{reply.id}_{uuid.uuid4().hex[:6]}.bin"
+    media = reply.video or reply.document or reply.photo
+    tmp   = os.path.join(TMP_DIR, f"info_{reply.id}_{uuid.uuid4().hex[:6]}.bin")
     try:
-        ok = await _stream_chunk(media, 8 * 1024 * 1024, tmp)
+        ok = await _stream_chunk(app, media, 8 * 1024 * 1024, tmp)
         if not ok:
-            tmp2 = await reply.download()
+            download_path = os.path.join(TMP_DIR, getattr(media, 'file_name', f"info_{reply.id}.bin") or f"info_{reply.id}.bin")
+            tmp2 = await reply.download(file_name=download_path)
             result = await _probe(tmp2)
             os.remove(tmp2)
         else:
@@ -681,6 +624,8 @@ async def shutdown_cmd(_, m):
     await m.reply_text("Shutting down…")
     scheduler.shutdown(wait=False)
     await app.stop()
+    if user_app:
+        await user_app.stop()
     os._exit(0)
 
 
@@ -696,23 +641,228 @@ async def update_cmd(_, m):
         await m.reply_text(f"Update failed: {e}")
 
 
+# ── Scan past messages ───────────────────────────────────
+
+_scan_active: dict[int, bool] = {}   # channel_id → running flag
+
+
+@app.on_message(filters.command("scan") & filters.user(ADMIN_ID))
+async def scan_cmd(_, m):
+    """
+    /scan <chat_id> [limit] [offset_id]
+    Scans past messages in a channel/group and adds media info captions.
+    limit defaults to 0 (all messages).
+    offset_id defaults to 0 (start from newest).
+    """
+    parts = m.text.split()
+    if len(parts) < 2:
+        return await m.reply_text(
+            "⚠️ Usage: <code>/scan &lt;chat_id&gt; [limit] [offset_id]</code>\n\n"
+            "Example:\n"
+            "<code>/scan -1001234567890</code>  — scan all\n"
+            "<code>/scan -1001234567890 100</code>  — scan last 100 posts\n"
+            "<code>/scan -1001234567890 0 1234</code> — scan starting from msg 1234",
+            parse_mode=ParseMode.HTML,
+        )
+
+    try:
+        chat_id = int(parts[1])
+    except ValueError:
+        return await m.reply_text("❌ Invalid chat ID.")
+
+    limit = 0
+    if len(parts) >= 3:
+        try:
+            limit = int(parts[2])
+        except ValueError:
+            return await m.reply_text("❌ Invalid limit number.")
+
+    offset_id = 0
+    if len(parts) >= 4:
+        try:
+            offset_id = int(parts[3])
+        except ValueError:
+            return await m.reply_text("❌ Invalid offset_id number.")
+
+    if chat_id in _scan_active and _scan_active[chat_id]:
+        return await m.reply_text("⚠️ A scan is already running for this chat.")
+
+    _scan_active[chat_id] = True
+    asyncio.create_task(_run_scan(m, chat_id, limit, offset_id))
+
+
+@app.on_message(filters.command("stopscan") & filters.user(ADMIN_ID))
+async def stopscan_cmd(_, m):
+    """Stop a running scan. Usage: /stopscan <channel_id>"""
+    parts = m.text.split()
+    if len(parts) < 2:
+        running = [str(cid) for cid, v in _scan_active.items() if v]
+        if running:
+            return await m.reply_text(
+                f"⚠️ Usage: <code>/stopscan &lt;channel_id&gt;</code>\n\n"
+                f"Active scans: {', '.join(running)}",
+                parse_mode=ParseMode.HTML,
+            )
+        return await m.reply_text("ℹ️ No active scans.")
+
+    try:
+        chat_id = int(parts[1])
+    except ValueError:
+        return await m.reply_text("❌ Invalid channel ID.")
+
+    if chat_id in _scan_active and _scan_active[chat_id]:
+        _scan_active[chat_id] = False
+        await m.reply_text("🛑 Scan will stop after the current file finishes.")
+    else:
+        await m.reply_text("ℹ️ No active scan for this channel.")
+
+
+async def _run_scan(admin_msg, chat_id: int, limit: int, offset_id: int = 0):
+    """Iterate chat history and add media info to uncaptioned videos."""
+    # Determine which client to use: try Bot first, fallback to User
+    history_client = app
+    try:
+        await app.get_chat(chat_id)
+        # Try a tiny history fetch to verify access
+        async for _ in app.get_chat_history(chat_id, limit=1):
+            break
+    except Exception:
+        if user_app:
+            history_client = user_app
+            logger.info(f"Bot access failed for {chat_id}, falling back to User Helper")
+        else:
+            return await admin_msg.reply_text(
+                "❌ <b>Access Denied</b>\n\n"
+                "The Bot cannot access this chat history. "
+                "Please configure a <code>STRING_SESSION</code> in your .env to use the User Helper fallback.",
+                parse_mode=ParseMode.HTML
+            )
+
+    status = await admin_msg.reply_text(
+        f"🔍 Starting scan of <code>{chat_id}</code> using "
+        f"{'<b>User Helper</b>' if history_client == user_app else '<b>Bot Account</b>'}…",
+        parse_mode=ParseMode.HTML
+    )
+
+    scanned = 0
+    edited  = 0
+    skipped = 0
+    errors  = 0
+
+    # Determine which client to use for history
+    history_client = user_app if user_app else app
+    
+    try:
+        async for message in history_client.get_chat_history(chat_id, limit=limit or None, offset_id=offset_id or 0):
+            # Check for cancellation
+            if not _scan_active.get(chat_id, False):
+                await _safe_edit(status, f"🛑 Scan stopped.\n\n📊 Scanned: {scanned} | ✅ Edited: {edited} | ⏭ Skipped: {skipped} | ❌ Errors: {errors}")
+                return
+
+            # Skip non-media messages
+            if not (message.video or message.document or message.photo):
+                continue
+
+            scanned += 1
+
+            # Skip if already has media info
+            if caption_has_media_info(message.caption or ''):
+                skipped += 1
+                logger.info(f"[{scanned}] Skipping msg {message.id} (already has info)")
+                if scanned % 25 == 0:
+                    await _safe_edit(
+                        status,
+                        f"🔍 Scanning… {scanned} checked | ✅ {edited} edited | ⏭ {skipped} skipped | ❌ {errors} errors",
+                    )
+                continue
+
+            # Process the message
+            try:
+                logger.info(f"[{scanned}] Processing msg {message.id}...")
+                # Use the client that fetched the message for processing and editing
+                caption, file_path = await process_message(history_client, message)
+                logger.info(f"[{scanned}] Generated scan caption:\n{caption}")
+
+                try:
+                    await history_client.edit_message_caption(chat_id, message.id, caption, parse_mode=ParseMode.HTML)
+                    edited += 1
+                    logger.info(f"[{scanned}] ✅ Edited msg {message.id}")
+                except FloodWait as e:
+                    logger.warning(f"Scan FloodWait: sleeping {e.value}s")
+                    await asyncio.sleep(e.value)
+                    await history_client.edit_message_caption(chat_id, message.id, caption, parse_mode=ParseMode.HTML)
+                    edited += 1
+                    logger.info(f"[{scanned}] ✅ Edited msg {message.id} (after FloodWait)")
+                except MessageNotModified:
+                    skipped += 1
+                    logger.info(f"[{scanned}] ⏭ Msg {message.id} not modified")
+                except Exception as e:
+                    logger.error(f"[{scanned}] ❌ Edit failed msg {message.id}: {e}")
+                    errors += 1
+
+                if file_path and os.path.exists(file_path):
+                    await aioremove(file_path)
+
+                # Rate limit between edits
+                await asyncio.sleep(EDIT_DELAY)
+
+            except Exception as e:
+                logger.error(f"Scan process error msg {message.id}: {e}")
+                errors += 1
+
+            # Progress update every 25 files
+            if scanned % 25 == 0:
+                await _safe_edit(
+                    status,
+                    f"🔍 Scanning… {scanned} checked | ✅ {edited} edited | ⏭ {skipped} skipped | ❌ {errors} errors",
+                )
+
+    except FloodWait as e:
+        logger.warning(f"Scan history FloodWait: sleeping {e.value}s")
+        await asyncio.sleep(e.value)
+        # Don't restart — just report what we have so far
+    except Exception as e:
+        logger.error(f"Scan failed: {e}")
+        await _safe_edit(status, f"❌ Scan error: <code>{e}</code>\n\n📊 Scanned: {scanned} | ✅ Edited: {edited} | ⏭ Skipped: {skipped} | ❌ Errors: {errors}", parse_mode=ParseMode.HTML)
+        return
+    finally:
+        _scan_active[chat_id] = False
+
+    await _safe_edit(
+        status,
+        f"✅ Scan complete!\n\n📊 Scanned: {scanned} | ✅ Edited: {edited} | ⏭ Skipped: {skipped} | ❌ Errors: {errors}",
+    )
+
+
 def _install_deps():
     for binary, pkg in (("ffprobe", "ffmpeg"), ("mediainfo", "mediainfo")):
         r = subprocess.run(["which", binary], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if r.returncode != 0:
-            logger.info(f"Installing {pkg}…")
-            subprocess.run(["apt", "update", "-y"], stdout=subprocess.DEVNULL)
-            subprocess.run(["apt", "install", "-y", pkg], stdout=subprocess.DEVNULL)
+            logger.warning(f"❌ Missing dependency: {pkg}. Please install it manually (e.g., 'sudo pacman -S {pkg}' or 'sudo apt install {pkg}').")
 
 
 async def main():
+    if not os.path.exists(TMP_DIR):
+        os.makedirs(TMP_DIR)
+
     gc.set_threshold(*GC_THRESHOLD)
     _install_deps()
 
     await app.start()
+    if user_app:
+        await user_app.start()
+        
     me = await app.get_me()
     logger.info(f"@{me.username} started")
-    await app.send_message(ADMIN_ID, "🚀 Bot Started")
+    if user_app:
+        u_me = await user_app.get_me()
+        logger.info(f"User Helper started: @{u_me.username or u_me.id}")
+    try:
+        await app.send_message(ADMIN_ID, "🚀 Bot Started")
+    except PeerIdInvalid:
+        logger.warning(f"⚠️ Could not send startup message to ADMIN_ID {ADMIN_ID}. Have you started the bot yet?")
+    except Exception as e:
+        logger.warning(f"⚠️ Startup message failed: {e}")
 
     scheduler.add_job(gc.collect, "interval", minutes=20)
     scheduler.start()

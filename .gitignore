@@ -3,5 +3,4 @@
 *.session-journal
 __pycache__/
 *.py[cod]
-temp_*.bin
-downloads/
+tmp/

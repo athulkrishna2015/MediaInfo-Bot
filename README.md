@@ -1,6 +1,6 @@
 # 🎬 MediaInfo Bot
 
-> A Telegram bot that automatically enriches video captions with media information — quality, codec, duration, audio languages, and subtitles — for posts in your channels. Also works in private chats for on-demand analysis.
+> A Telegram bot that automatically enriches video captions with media information — quality, codec, duration, audio languages, and subtitles — for posts in your channels and groups. Also works in private chats for on-demand analysis.
 
 **Made by [@piroxbots](https://t.me/piroxbots) · Bug reports: [@notyourpiro](https://t.me/notyourpiro)**
 
@@ -15,7 +15,7 @@
 - **HDR detection** — HDR and Dolby Vision flags from stream metadata
 - **Audio language labelling** — 50+ language codes resolved to full names; unknown streams labelled `Unknown`
 - **Subtitle detection** — PGS, SRT, ASS/SSA, and more; falls back to `No Sub`
-- **Channel mode** — auto-edits post captions; skips posts already containing media info
+- **Channel & Group mode** — auto-edits post captions; skips posts already containing media info
 - **Private chat mode** — replies with a live progress message updated in real time
 - **Admin commands** — server stats, restart, git pull + restart, shutdown
 - **Scheduled garbage collection** — keeps memory use low over long uptimes
@@ -90,7 +90,7 @@ Full reference:
 | `API_HASH` | Telegram API hash from my.telegram.org | — |
 | `BOT_TOKEN` | Bot token from @BotFather | — |
 | `ADMIN_ID` | Your Telegram user ID (for admin commands) | — |
-| `ALLOWED_CHATS` | Comma-separated channel IDs (e.g. `-1001234567890,-1009876543210`) | — |
+| `ALLOWED_CHATS` | Comma-separated channel/group IDs (e.g. `-1001234567890,-1009876543210`) | — |
 | `LOG_LEVEL` | Logging level (`INFO`, `DEBUG`, `WARNING`, etc.) | `INFO` |
 | `LOG_FORMAT` | Log line format string | timestamp/module/level/message |
 | `GC_THRESHOLD_0` | Python GC generation 0 threshold | `500` |
@@ -180,6 +180,15 @@ Temp files cleaned up
 | `/restart` | Restart the bot process (`os.execv`) |
 | `/update` | `git pull` + `pip install -r requirements.txt` + restart |
 | `/shutdown` | Stop the scheduler and bot, then exit |
+| `/scan <chat_id> [limit] [offset_id]` | Scan past posts in channel/group (optional start point) |
+| `/stopscan <chat_id>` | Stop a running scan |
+| `/info` (reply to video) | Analyse a specific video inline (works for everyone) |
+
+#### Scan Examples
+- `/scan -1001234567890` — Scan **all** past messages.
+- `/scan -1001234567890 100` — Scan only the **last 100** messages.
+- `/scan -1001234567890 0 54321` — Scan starting from message ID **54321** and work backwards.
+- `/stopscan -1001234567890` — Cancel the scan for this chat.
 
 ---
 
