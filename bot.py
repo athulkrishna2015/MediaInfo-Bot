@@ -281,22 +281,23 @@ def get_full_language_name(code: str) -> str:
 
 
 @lru_cache(maxsize=64)
-def get_standard_resolution(height: int) -> Optional[str]:
-    if not height:
+def get_standard_resolution(width: int, height: int) -> Optional[str]:
+    min_dim = min(width, height) if width and height else max(width, height)
+    if not min_dim:
         return None
-    if height <= 240:
+    if min_dim <= 240:
         return "240p"
-    if height <= 360:
+    if min_dim <= 360:
         return "360p"
-    if height <= 480:
+    if min_dim <= 480:
         return "480p"
-    if height <= 720:
+    if min_dim <= 720:
         return "720p"
-    if height <= 1080:
+    if min_dim <= 1080:
         return "1080p"
-    if height <= 1440:
+    if min_dim <= 1440:
         return "1440p"
-    if height <= 2160:
+    if min_dim <= 2160:
         return "2160p"
     return "2160p+"
 
@@ -668,7 +669,7 @@ def _build_video_line(info: dict[str, Any], *, is_photo: bool = False) -> str:
     if is_photo and width and height:
         parts.append(f"{width}x{height}")
     else:
-        resolution = get_standard_resolution(height)
+        resolution = get_standard_resolution(width, height)
         if resolution:
             parts.append(resolution)
         elif width and height:
@@ -702,14 +703,40 @@ def _extract_text_and_files(message: Any, media: Any, *, is_photo: bool, is_vide
             item_media = item.video or item.document or item.photo
             if item_media:
                 name = (getattr(item_media, "file_name", None) or "").strip()
+                is_item_photo = bool(item.photo or (item.document and getattr(item.document, "mime_type", "").startswith("image/")))
+                is_item_video = bool(item.video or (item.document and getattr(item.document, "mime_type", "").startswith("video/")))
+                
                 if not name:
-                    if item.photo:
+                    if is_item_photo:
                         name = "Photo"
-                    elif item.video:
+                    elif is_item_video:
                         name = "Video"
                     else:
                         name = "File"
-                file_names.append(f"{i}. {name}")
+                
+                info_parts = []
+                size = getattr(item_media, "file_size", 0)
+                if size:
+                    info_parts.append(_human_size(size))
+                    
+                width = _parse_int(getattr(item_media, "width", 0))
+                height = _parse_int(getattr(item_media, "height", 0))
+                if width or height:
+                    if is_item_photo:
+                        info_parts.append(f"📸 {width}x{height}")
+                    else:
+                        res = get_standard_resolution(width, height) or f"{width}x{height}"
+                        info_parts.append(f"🎬 {res}")
+                
+                duration = _parse_duration(getattr(item_media, "duration", 0))
+                if duration and not is_item_photo:
+                    info_parts.append(f"⏳ {_fmt_duration(duration)}")
+                    
+                details = " | ".join(info_parts)
+                if details:
+                    file_names.append(f"{i}. {name} ({details})")
+                else:
+                    file_names.append(f"{i}. {name}")
     
     file_name = "\n".join(file_names) if group else (getattr(media, "file_name", None) or "").strip()
 
@@ -792,15 +819,16 @@ def _build_caption(message: Any, media: Any, info: dict[str, Any], group: Option
     if caption_text:
         lines.append(f"<b>{caption_text}</b>")
 
-    primary_line = f"{media_emoji} <b>{video_line}</b>"
-    if duration and not is_photo:
-        primary_line += f" | ⏳ <b>{html.escape(_fmt_duration(duration))}</b>"
-    lines.append(primary_line)
+    if not group:
+        primary_line = f"{media_emoji} <b>{video_line}</b>"
+        if duration and not is_photo:
+            primary_line += f" | ⏳ <b>{html.escape(_fmt_duration(duration))}</b>"
+        lines.append(primary_line)
 
-    if audio_text:
-        lines.append(f"🔊 <b>{audio_text}</b>")
-    if subtitle_text:
-        lines.append(f"💬 <b>{subtitle_text}</b>")
+        if audio_text:
+            lines.append(f"🔊 <b>{audio_text}</b>")
+        if subtitle_text:
+            lines.append(f"💬 <b>{subtitle_text}</b>")
 
     if file_list:
         lines.append(f"<b>{file_list}</b>")
