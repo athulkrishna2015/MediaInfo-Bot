@@ -6,3 +6,6 @@ __pycache__/
 tmp/*.temp
 probe_*.bin
 tmp/
+.venv/
+.codex
+.pytest_cache/

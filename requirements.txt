@@ -3,3 +3,4 @@ TgCrypto
 pyrofork==2.3.45
 apscheduler
 psutil
+python-dotenv

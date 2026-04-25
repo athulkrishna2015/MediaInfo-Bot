@@ -1,78 +1,77 @@
 # 🎬 MediaInfo Bot
 
-> A Telegram bot that automatically enriches video captions with media information — quality, codec, duration, audio languages, and subtitles — for posts in your channels and groups. Also works in private chats for on-demand analysis.
+> A Telegram bot that enriches captions with media details like resolution, codec, duration, audio languages, and subtitles. It supports channels, groups, and private chats.
 
 **Made by [@piroxbots](https://t.me/piroxbots) · Bug reports: [@notyourpiro](https://t.me/notyourpiro)**
 
----
-
 ## Features
 
-- **Smart partial scanning** — streams as little as 16 KB first, escalates to 256 KB, then full download only as a last resort
-- **Parallel processing** — up to 6 concurrent stream workers and 3 channel workers
-- **Resolution detection** — 240p through 2160p+
-- **Codec detection** — x264 / HEVC / AV1 / VP9 / MPEG4 with bit depth (e.g. `10bit`)
-- **HDR detection** — HDR and Dolby Vision flags from stream metadata
-- **Audio language labelling** — 50+ language codes resolved to full names; unknown streams labelled `Unknown`
-- **Subtitle detection** — PGS, SRT, ASS/SSA, and more; falls back to `No Sub`
-- **Channel & Group mode** — auto-edits post captions; skips posts already containing media info
-- **Private chat mode** — replies with a live progress message updated in real time
-- **Admin commands** — server stats, restart, git pull + restart, shutdown
-- **Scheduled garbage collection** — keeps memory use low over long uptimes
+- Progressive probing for videos: `16 KB` → `1 MB` → `3 MB` → `8 MB`
+- Rich caption output with resolution, codec, bit depth, HDR, duration, audio, and subtitle labels
+- `/info` fallback to full download when partial probing is not enough
+- Photo, video, and document support in private chats
+- Channel/group auto-editing for allowed chats only
+- Admin commands for server status, restart, update, shutdown, and history scans
+- Optional user-helper account via `STRING_SESSION` for history scans
+- Config validation on startup with clear error messages
 
----
+## Caption Template
 
-## Caption Format
-
-```
-<original caption or filename>
-
-🎬 1080p HEVC 10bit HDR | ⏳ 01:45:32
-🔊 English, Hindi
-💬 ESUB
-```
-
-The template is fully customisable via the `CAPTION_TEMPLATE` environment variable using Python `str.format()` placeholders:
+The bot uses `CAPTION_TEMPLATE` with Python `str.format()` placeholders:
 
 | Placeholder | Description |
 |---|---|
 | `{title}` | Original caption or filename |
-| `{video_line}` | Quality + codec + bit depth + HDR (e.g. `1080p HEVC 10bit HDR`) |
+| `{video_line}` | Resolution + codec details, for example `1080p HEVC 10bit HDR` |
 | `{duration}` | Duration as `HH:MM:SS` |
-| `{audio}` | Comma-separated audio language list |
-| `{subtitle}` | Subtitle languages, or `No Sub` |
+| `{audio}` | Audio language list |
+| `{subtitle}` | Subtitle list or `No Sub` |
 
----
+Default output:
+
+```html
+<b>{title}</b>
+
+🎬 <b>{video_line}</b> | ⏳ <b>{duration}</b>
+🔊 <b>{audio}</b>
+💬 <b>{subtitle}</b>
+```
 
 ## Requirements
 
 - Python 3.10+
-- `ffprobe` (part of [FFmpeg](https://ffmpeg.org/)) — auto-installed on first run if missing
-- `mediainfo` — auto-installed on first run if missing
+- `ffprobe` from [FFmpeg](https://ffmpeg.org/)
+- `mediainfo`
 - Telegram API credentials from [my.telegram.org](https://my.telegram.org)
 - A bot token from [@BotFather](https://t.me/BotFather)
-- The bot must be an **admin** in every target channel (to edit captions)
+- The bot must be an admin in every target channel you want it to edit
 
----
+The bot now checks for missing system dependencies and logs a clear warning. It does not try to install OS packages at runtime.
 
 ## Setup
 
 ### 1. Clone the repo
 
 ```bash
-git clone https://github.com/youruser/mediainfo-bot.git
-cd mediainfo-bot
+git clone https://github.com/PIROXTG/MediaInfo-Bot.git
+cd MediaInfo-Bot
 ```
 
-### 2. Install Python dependencies
+### 2. Install dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3. Configure environment variables
+Install system packages too:
 
-Create a `.env` file in the project root (you can copy the example below):
+```bash
+sudo apt install ffmpeg mediainfo
+```
+
+### 3. Configure `.env`
+
+An example file is included as `.env.example`.
 
 ```env
 API_ID=your_api_id
@@ -80,23 +79,25 @@ API_HASH=your_api_hash
 BOT_TOKEN=your_bot_token
 ADMIN_ID=your_telegram_user_id
 ALLOWED_CHATS=-1001234567890,-1009876543210
+# STRING_SESSION=optional_user_session
 ```
 
-Full reference:
+Configuration reference:
 
-| Variable | Description | Default |
+| Variable | Description | Required |
 |---|---|---|
-| `API_ID` | Telegram API ID from my.telegram.org | — |
-| `API_HASH` | Telegram API hash from my.telegram.org | — |
-| `BOT_TOKEN` | Bot token from @BotFather | — |
-| `ADMIN_ID` | Your Telegram user ID (for admin commands) | — |
-| `ALLOWED_CHATS` | Comma-separated channel/group IDs (e.g. `-1001234567890,-1009876543210`) | — |
-| `LOG_LEVEL` | Logging level (`INFO`, `DEBUG`, `WARNING`, etc.) | `INFO` |
-| `LOG_FORMAT` | Log line format string | timestamp/module/level/message |
-| `GC_THRESHOLD_0` | Python GC generation 0 threshold | `500` |
-| `GC_THRESHOLD_1` | Python GC generation 1 threshold | `5` |
-| `GC_THRESHOLD_2` | Python GC generation 2 threshold | `5` |
-| `CAPTION_TEMPLATE` | Custom HTML caption template (see above) | built-in |
+| `API_ID` | Telegram API ID | Yes |
+| `API_HASH` | Telegram API hash | Yes |
+| `BOT_TOKEN` | Bot token | Yes |
+| `ADMIN_ID` | Telegram user ID allowed to run admin commands | Yes |
+| `ALLOWED_CHATS` | Comma-separated chat IDs for auto-editing | No |
+| `STRING_SESSION` | Optional user account session for history-scan fallback | No |
+| `LOG_LEVEL` | Logging level | No |
+| `LOG_FORMAT` | Python logging format | No |
+| `GC_THRESHOLD_0` | GC threshold gen 0 | No |
+| `GC_THRESHOLD_1` | GC threshold gen 1 | No |
+| `GC_THRESHOLD_2` | GC threshold gen 2 | No |
+| `CAPTION_TEMPLATE` | Custom HTML caption template | No |
 
 ### 4. Run
 
@@ -104,13 +105,7 @@ Full reference:
 python bot.py
 ```
 
-On startup the bot will:
-1. Install `ffmpeg` and `mediainfo` if not present
-2. Connect to Telegram
-3. Send a `🚀 Bot Started` message to `ADMIN_ID`
-4. Begin scheduling garbage collection every 10 minutes
-
----
+On startup the bot validates config, checks for `ffprobe`/`mediainfo`, connects to Telegram, sends a startup message to `ADMIN_ID`, and starts scheduled garbage collection.
 
 ## Docker
 
@@ -119,49 +114,7 @@ docker build -t mediainfo-bot .
 docker run -d --env-file .env mediainfo-bot
 ```
 
-The image is based on `python:3.11-slim` and installs `ffmpeg` at build time.
-
----
-
-## Deploy to Railway / Heroku
-
-Set all environment variables in the platform dashboard and push. The `Procfile` is already included.
-
----
-
-## How It Works
-
-```
-Post arrives in channel (or file sent in private chat)
-        │
-        ▼
-Already has media info? ──► Skip (channel) / reply anyway (private)
-        │
-        ▼
-Stream first 16 KB → run mediainfo
-        │
-  width & height found?
-    Yes ──► Build caption
-    No  ──► Retry once
-        │
-        ▼
-Stream first 256 KB → run mediainfo
-        │
-  width & height found?
-    Yes ──► Build caption
-    No  ──►
-        │
-        ▼
-Full download → run mediainfo → Build caption
-        │
-        ▼
-Channel: edit_caption()   Private: edit progress message
-        │
-        ▼
-Temp files cleaned up
-```
-
----
+The Docker image installs both `ffmpeg` and `mediainfo`.
 
 ## Commands
 
@@ -170,68 +123,47 @@ Temp files cleaned up
 | Command | Description |
 |---|---|
 | `/start` | Introduction and usage guide |
-| `/info` (reply to video) | Analyse a specific video inline |
+| `/info` | Reply to a video, photo, or document to analyse it inline |
 
 ### Admin Commands
 
 | Command | Description |
 |---|---|
 | `/server` | Show CPU, RAM, and disk usage |
-| `/restart` | Restart the bot process (`os.execv`) |
-| `/update` | `git pull` + `pip install -r requirements.txt` + restart |
-| `/shutdown` | Stop the scheduler and bot, then exit |
-| `/scan <chat_id> [limit] [offset_id]` | Scan past posts in channel/group (optional start point) |
+| `/restart` | Restart the bot process |
+| `/update` | `git pull --ff-only`, install Python deps, then restart |
+| `/shutdown` | Stop the bot |
+| `/scan <chat_id> [limit] [offset_id]` | Scan older posts in a channel/group |
 | `/stopscan <chat_id>` | Stop a running scan |
-| `/info` (reply to video) | Analyse a specific video inline (works for everyone) |
 
-#### Scan Examples
-- `/scan -1001234567890` — Scan **all** past messages.
-- `/scan -1001234567890 100` — Scan only the **last 100** messages.
-- `/scan -1001234567890 0 54321` — Scan starting from message ID **54321** and work backwards.
-- `/stopscan -1001234567890` — Cancel the scan for this chat.
+Scan examples:
 
----
+- `/scan -1001234567890`
+- `/scan -1001234567890 100`
+- `/scan -1001234567890 0 54321`
+- `/stopscan -1001234567890`
 
-## Supported Audio Languages
+## Notes
 
-The bot resolves ISO 639-1 and ISO 639-2 language codes to full names. Recognised languages include:
-
-Hindi, Marathi, Tamil, Telugu, Malayalam, Kannada, Bengali, Gujarati, Punjabi, Bhojpuri, Urdu, English, French, German, Spanish, Portuguese, Italian, Dutch, Polish, Swedish, Danish, Norwegian, Finnish, Russian, Ukrainian, Bulgarian, Czech, Slovak, Serbian, Croatian, Romanian, Hungarian, Greek, Turkish, Arabic, Hebrew, Persian, Chinese, Japanese, Korean, Thai, Vietnamese, Indonesian, Malay, Tagalog, and more.
-
-Unknown codes are labelled `Unknown`.
-
----
+- If `ALLOWED_CHATS` is empty, auto-editing for channels/groups is disabled, but private chat features still work.
+- History scans use the bot account first. If that fails and `STRING_SESSION` is configured, the bot falls back to the user helper account.
+- Generic documents get a lightweight size caption instead of media-track details.
 
 ## Project Structure
 
+```text
+MediaInfo-Bot/
+├── bot.py
+├── config.py
+├── gen_session.py
+├── requirements.txt
+├── Dockerfile
+├── Procfile
+└── .env.example
 ```
-mediainfo-bot/
-├── bot.py            # Main bot logic — handlers, media processing, caption building
-├── config.py         # Environment variable loading with defaults
-├── requirements.txt  # Python dependencies
-├── Dockerfile        # Container build (python:3.11-slim + ffmpeg)
-├── Procfile          # For Railway / Heroku deployments
-└── .gitignore
-```
 
----
+## Support
 
-## Dependencies
-
-| Package | Purpose |
-|---|---|
-| `pyrofork` | Telegram MTProto client (Pyrogram fork) |
-| `TgCrypto` | Fast cryptography for Pyrogram |
-| `aiofiles` | Async file I/O for streaming downloads |
-| `apscheduler` | Periodic garbage collection scheduler |
-| `psutil` | CPU / RAM / disk stats for `/server` |
-| `mediainfo` (system) | Stream metadata extraction |
-| `ffmpeg` / `ffprobe` (system) | Fallback media analysis |
-
----
-
-## Bug Reports & Support
-
-Found a bug or need help? Open an issue or reach out at **[@notyourpiro](https://t.me/notyourpiro)**
+Found a bug or need help? Open an issue or reach out at **[@notyourpiro](https://t.me/notyourpiro)**.
 
 **Bot channel: [@piroxbots](https://t.me/piroxbots)**

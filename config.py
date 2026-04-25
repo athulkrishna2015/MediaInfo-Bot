@@ -1,34 +1,98 @@
 import os
+from typing import Optional
+
 from dotenv import load_dotenv
 
 load_dotenv()
 
-API_ID = int(os.environ.get("API_ID", ))
-API_HASH = os.environ.get("API_HASH", "")
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-STRING_SESSION = os.environ.get("STRING_SESSION", "")
+CONFIG_ERRORS: list[str] = []
 
-ADMIN_ID = int(os.environ.get("ADMIN_ID", ))
 
-_raw = os.environ.get("ALLOWED_CHATS", "")
-ALLOWED_CHATS = [int(x.strip()) for x in _raw.split(",") if x.strip()]
+def _read_env(name: str, default: str = "") -> str:
+    return os.getenv(name, default).strip()
 
-LOG_FORMAT = os.environ.get(
+
+def _read_int(name: str, *, required: bool = False) -> Optional[int]:
+    raw = _read_env(name)
+    if not raw:
+        if required:
+            CONFIG_ERRORS.append(f"{name} is required.")
+        return None
+
+    try:
+        return int(raw)
+    except ValueError:
+        CONFIG_ERRORS.append(f"{name} must be an integer.")
+        return None
+
+
+def _read_int_with_default(name: str, default: int) -> int:
+    raw = _read_env(name)
+    if not raw:
+        return default
+
+    try:
+        return int(raw)
+    except ValueError:
+        CONFIG_ERRORS.append(f"{name} must be an integer.")
+        return default
+
+
+def _read_int_list(name: str) -> list[int]:
+    raw = _read_env(name)
+    if not raw:
+        return []
+
+    values: list[int] = []
+    for item in raw.split(","):
+        candidate = item.strip()
+        if not candidate:
+            continue
+        try:
+            values.append(int(candidate))
+        except ValueError:
+            CONFIG_ERRORS.append(f"{name} contains an invalid integer: {candidate}")
+    return values
+
+
+API_ID = _read_int("API_ID", required=True)
+API_HASH = _read_env("API_HASH")
+BOT_TOKEN = _read_env("BOT_TOKEN")
+STRING_SESSION = _read_env("STRING_SESSION")
+ADMIN_ID = _read_int("ADMIN_ID", required=True)
+ALLOWED_CHATS = _read_int_list("ALLOWED_CHATS")
+
+if not API_HASH:
+    CONFIG_ERRORS.append("API_HASH is required.")
+
+if not BOT_TOKEN:
+    CONFIG_ERRORS.append("BOT_TOKEN is required.")
+
+LOG_FORMAT = _read_env(
     "LOG_FORMAT",
     "[%(asctime)s][%(name)s][%(module)s][%(lineno)d][%(levelname)s] -> %(message)s",
 )
-LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
+LOG_LEVEL = _read_env("LOG_LEVEL", "INFO") or "INFO"
 
 GC_THRESHOLD = (
-    int(os.environ.get("GC_THRESHOLD_0", 500)),
-    int(os.environ.get("GC_THRESHOLD_1", 5)),
-    int(os.environ.get("GC_THRESHOLD_2", 5)),
+    _read_int_with_default("GC_THRESHOLD_0", 500),
+    _read_int_with_default("GC_THRESHOLD_1", 5),
+    _read_int_with_default("GC_THRESHOLD_2", 5),
 )
 
-CAPTION_TEMPLATE = os.environ.get(
-    "CAPTION_TEMPLATE",
+DEFAULT_CAPTION_TEMPLATE = (
     "<b>{title}</b>\n\n"
     "🎬 <b>{video_line}</b> | ⏳ <b>{duration}</b>\n"
     "🔊 <b>{audio}</b>\n"
-    "💬 <b>{subtitle}</b>\n\n"
+    "💬 <b>{subtitle}</b>"
 )
+
+CAPTION_TEMPLATE = _read_env("CAPTION_TEMPLATE", DEFAULT_CAPTION_TEMPLATE) or DEFAULT_CAPTION_TEMPLATE
+
+
+def validate_config() -> None:
+    if not CONFIG_ERRORS:
+        return
+
+    details = "\n".join(f"- {item}" for item in CONFIG_ERRORS)
+    raise RuntimeError(f"Invalid configuration:\n{details}")
