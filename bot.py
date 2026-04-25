@@ -909,6 +909,9 @@ async def process_message(client: Client, message: Any, progress_msg: Any = None
     if not media:
         return "", None
 
+    link = getattr(message, "link", None) or f"ID: {message.id}"
+    logger.info("Processing message: %s", link)
+
     is_photo = _is_photo_message(message)
     is_video = _is_video_message(message)
     base_info = _base_info_from_message(message, media)
@@ -1235,7 +1238,7 @@ async def update_cmd(_, message: Any) -> None:
         )
 
 
-_scan_active: dict[int, bool] = {}
+_scan_active: dict[str, bool] = {}
 
 
 @app.on_message(filters.command("scan") & ADMIN_FILTER)
@@ -1243,20 +1246,44 @@ async def scan_cmd(_, message: Any) -> None:
     parts = message.text.split()
     if len(parts) < 2:
         await message.reply_text(
-            "⚠️ Usage: <code>/scan &lt;chat_id&gt; [limit] [offset_id]</code>\n\n"
-            "Example:\n"
-            "<code>/scan -1001234567890</code> — scan all\n"
+            "⚠️ Usage: <code>/scan &lt;chat_id_or_link&gt; [limit] [offset_id]</code>\n\n"
+            "Examples:\n"
+            "<code>/scan https://t.me/c/12345/678</code> — scan starting from msg 678\n"
             "<code>/scan -1001234567890 100</code> — scan last 100 posts\n"
-            "<code>/scan -1001234567890 0 1234</code> — scan starting from msg 1234",
+            "<code>/scan username 0 1234</code> — scan starting from msg 1234",
             parse_mode=ParseMode.HTML,
         )
         return
 
-    try:
-        chat_id = int(parts[1])
-    except ValueError:
-        await message.reply_text("❌ Invalid chat ID.")
-        return
+    target_str = parts[1]
+    offset_id = 0
+    chat_id: Union[int, str] = 0
+
+    if target_str.startswith("http") or target_str.startswith("t.me"):
+        clean_link = target_str.replace("https://", "").replace("http://", "").replace("t.me/", "")
+        link_parts = [p for p in clean_link.split("/") if p]
+        if len(link_parts) >= 2:
+            if link_parts[0] == "c":
+                try:
+                    chat_id = int("-100" + link_parts[1])
+                    offset_id = int(link_parts[-1])
+                except ValueError:
+                    pass
+            else:
+                chat_id = link_parts[0]
+                try:
+                    offset_id = int(link_parts[-1])
+                except ValueError:
+                    pass
+                    
+        if not chat_id:
+            await message.reply_text("❌ Invalid link format.")
+            return
+    else:
+        try:
+            chat_id = int(target_str)
+        except ValueError:
+            chat_id = target_str
 
     limit = 0
     if len(parts) >= 3:
@@ -1269,7 +1296,6 @@ async def scan_cmd(_, message: Any) -> None:
             await message.reply_text("❌ Limit must be 0 or greater.")
             return
 
-    offset_id = 0
     if len(parts) >= 4:
         try:
             offset_id = int(parts[3])
@@ -1280,11 +1306,12 @@ async def scan_cmd(_, message: Any) -> None:
             await message.reply_text("❌ offset_id must be 0 or greater.")
             return
 
-    if _scan_active.get(chat_id):
+    chat_id_str = str(chat_id)
+    if _scan_active.get(chat_id_str):
         await message.reply_text("⚠️ A scan is already running for this chat.")
         return
 
-    _scan_active[chat_id] = True
+    _scan_active[chat_id_str] = True
     asyncio.create_task(_run_scan(message, chat_id, limit, offset_id))
 
 
@@ -1292,7 +1319,7 @@ async def scan_cmd(_, message: Any) -> None:
 async def stopscan_cmd(_, message: Any) -> None:
     parts = message.text.split()
     if len(parts) < 2:
-        running = [str(chat_id) for chat_id, active in _scan_active.items() if active]
+        running = [cid for cid, active in _scan_active.items() if active]
         if running:
             await message.reply_text(
                 f"⚠️ Usage: <code>/stopscan &lt;channel_id&gt;</code>\n\nActive scans: {', '.join(running)}",
@@ -1302,20 +1329,16 @@ async def stopscan_cmd(_, message: Any) -> None:
         await message.reply_text("ℹ️ No active scans.")
         return
 
-    try:
-        chat_id = int(parts[1])
-    except ValueError:
-        await message.reply_text("❌ Invalid channel ID.")
-        return
+    chat_id_str = parts[1]
 
-    if _scan_active.get(chat_id):
-        _scan_active[chat_id] = False
+    if _scan_active.get(chat_id_str):
+        _scan_active[chat_id_str] = False
         await message.reply_text("🛑 Scan will stop after the current file finishes.")
     else:
         await message.reply_text("ℹ️ No active scan for this channel.")
 
 
-async def _resolve_scan_client(chat_id: int) -> Client:
+async def _resolve_scan_client(chat_id: Union[int, str]) -> Client:
     try:
         await app.get_chat(chat_id)
         async for _ in app.get_chat_history(chat_id, limit=1):
@@ -1328,11 +1351,12 @@ async def _resolve_scan_client(chat_id: int) -> Client:
         raise
 
 
-async def _run_scan(admin_msg: Any, chat_id: int, limit: int, offset_id: int = 0) -> None:
+async def _run_scan(admin_msg: Any, chat_id: Union[int, str], limit: int, offset_id: int = 0) -> None:
+    chat_id_str = str(chat_id)
     try:
         history_client = await _resolve_scan_client(chat_id)
     except Exception:
-        _scan_active[chat_id] = False
+        _scan_active[chat_id_str] = False
         await admin_msg.reply_text(
             "❌ <b>Access Denied</b>\n\n"
             "The bot cannot access this chat history. "
@@ -1364,7 +1388,7 @@ async def _run_scan(admin_msg: Any, chat_id: int, limit: int, offset_id: int = 0
                 scanned_media_groups.add(media_group_key)
                 message, group = await _get_media_group_target(history_client, message)
 
-            if not _scan_active.get(chat_id, False):
+            if not _scan_active.get(chat_id_str, False):
                 await _safe_edit(
                     status,
                     f"🛑 Scan stopped.\n\n📊 Scanned: {scanned} | ✅ Edited: {edited} | ⏭ Skipped: {skipped} | ❌ Errors: {errors}",
@@ -1432,13 +1456,13 @@ async def _run_scan(admin_msg: Any, chat_id: int, limit: int, offset_id: int = 0
         )
         return
     finally:
-        _scan_active[chat_id] = False
-
-    await _safe_edit(
-        status,
-        f"✅ Scan complete!\n\n📊 Scanned: {scanned} | ✅ Edited: {edited} | ⏭ Skipped: {skipped} | ❌ Errors: {errors}",
-        force=True,
-    )
+        await _safe_edit(
+            status,
+            f"✅ <b>Scan Complete!</b>\n\n📊 Scanned: {scanned} | ✅ Edited: {edited} | ⏭ Skipped: {skipped} | ❌ Errors: {errors}",
+            parse_mode=ParseMode.HTML,
+            force=True,
+        )
+        _scan_active.pop(chat_id_str, None)
 
 
 def _install_deps() -> None:
