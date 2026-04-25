@@ -93,6 +93,11 @@ VIDEO_STREAM_STEPS = (16 * 1024, 1 * 1024 * 1024, 3 * 1024 * 1024, 8 * 1024 * 10
 PHOTO_STREAM_STEPS = (128 * 1024,)
 MEDIA_INFO_LINE_RE = re.compile(r"(?m)^(?:<b>)?(?:[📸🎬📄]|\d+\.\s+.*[📸🎬📄]).*$")
 
+def _status_print(text: str) -> None:
+    """Overwrite the current terminal line in-place (no scrolling spam)."""
+    sys.stdout.write(f"\r\033[K{text}")
+    sys.stdout.flush()
+
 
 def _loop_time() -> float:
     try:
@@ -913,7 +918,7 @@ async def process_message(client: Client, message: Any, progress_msg: Any = None
         return "", None
 
     link = getattr(message, "link", None) or f"ID: {message.id}"
-    logger.info("Processing message: %s", link)
+    _status_print(f"⚡ Processing: {link}")
 
     is_photo = _is_photo_message(message)
     is_video = _is_video_message(message)
