@@ -1269,13 +1269,13 @@ async def scan_cmd(_, message: Any) -> None:
             if link_parts[0] == "c":
                 try:
                     chat_id = int("-100" + link_parts[1])
-                    offset_id = int(link_parts[-1])
+                    offset_id = int(link_parts[-1]) + 1  # offset_id is exclusive in Telegram API
                 except ValueError:
                     pass
             else:
                 chat_id = link_parts[0]
                 try:
-                    offset_id = int(link_parts[-1])
+                    offset_id = int(link_parts[-1]) + 1  # offset_id is exclusive in Telegram API
                 except ValueError:
                     pass
                     
