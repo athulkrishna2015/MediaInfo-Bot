@@ -1132,7 +1132,8 @@ async def channel_handler(_, message: Any) -> None:
         logger.info("Generated gallery caption for %s (group %s)", target_message.id, media_group_id)
 
         channel_id = target_message.chat.id
-        channel_queues[channel_id].append((target_message, caption))
+        for msg in group:
+            channel_queues[channel_id].append((msg, caption))
         processed_media_groups[str(media_group_id)] = _loop_time()
         asyncio.create_task(_process_channel_queue(channel_id))
 
@@ -1554,7 +1555,13 @@ async def _run_scan(admin_msg: Any, chat_id: Union[int, str], limit: int, offset
                 return
             finally:
                 await _remove_path(file_path)
-        await _edit_with_delay(message.id, caption, author_client)
+        if group:
+            for msg in group:
+                if caption != (msg.caption or ""):
+                    await _edit_with_delay(msg.id, caption, author_client)
+        else:
+            if caption != (message.caption or ""):
+                await _edit_with_delay(message.id, caption, author_client)
 
     async def _iter_history():
         if not reverse:
