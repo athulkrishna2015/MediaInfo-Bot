@@ -71,6 +71,18 @@ API_ID = _read_int("API_ID", required=True)
 API_HASH = _read_env("API_HASH")
 BOT_TOKEN = _read_env("BOT_TOKEN")
 STRING_SESSION = _read_env("STRING_SESSION")
+
+# Collect all user sessions: STRING_SESSION, STRING_SESSION_2, STRING_SESSION_3, ...
+_sessions: list[str] = []
+if STRING_SESSION:
+    _sessions.append(STRING_SESSION)
+for _i in range(2, 20):  # support up to 19 accounts
+    _s = _read_env(f"STRING_SESSION_{_i}")
+    if _s:
+        _sessions.append(_s)
+    else:
+        break  # stop at first gap
+STRING_SESSIONS: list[str] = _sessions
 # Support both ADMIN_IDS (comma-separated) and legacy ADMIN_ID (single)
 _admin_ids_list = _read_int_list("ADMIN_IDS")
 _legacy_admin_id = _read_int("ADMIN_ID")

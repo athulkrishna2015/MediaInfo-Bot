@@ -42,7 +42,7 @@ from config import (
     LOG_FORMAT,
     LOG_LEVEL,
     SCAN_WORKERS,
-    STRING_SESSION,
+    STRING_SESSIONS,
     validate_config,
 )
 
@@ -59,18 +59,24 @@ app = Client(
     sleep_threshold=300,
 )
 
-user_app = (
+# Build list of user helper clients from all STRING_SESSION_* values
+user_apps: list[Client] = [
     Client(
-        "MediaInfo-User",
+        f"MediaInfo-User-{i + 1}",
         api_id=API_ID,
         api_hash=API_HASH,
-        session_string=STRING_SESSION,
+        session_string=session,
         workers=2,
         sleep_threshold=300,
     )
-    if STRING_SESSION
-    else None
-)
+    for i, session in enumerate(STRING_SESSIONS)
+]
+
+# Backward-compat alias — first user account (or None)
+user_app: Client | None = user_apps[0] if user_apps else None
+
+# Per-channel cache: remembers which client successfully edited last time
+_channel_edit_client: dict[str, Client] = {}
 
 stream_semaphore = asyncio.Semaphore(4)
 active_users: set[int] = set()
@@ -1398,16 +1404,23 @@ async def stopscan_cmd(_, message: Any) -> None:
 
 
 async def _resolve_scan_client(chat_id: Union[int, str]) -> Client:
+    """Try bot account first, then each user helper in order."""
     try:
         await app.get_chat(chat_id)
         async for _ in app.get_chat_history(chat_id, limit=1):
             break
         return app
     except Exception:
-        if user_app:
-            logger.info("Bot access failed for %s, falling back to User Helper", chat_id)
-            return user_app
-        raise
+        pass
+    for ua in user_apps:
+        try:
+            async for _ in ua.get_chat_history(chat_id, limit=1):
+                break
+            logger.info("Bot access failed for %s, using User Helper (%s)", chat_id, await ua.get_me())
+            return ua
+        except Exception:
+            continue
+    raise RuntimeError(f"No client can access history for {chat_id}")
 
 
 async def _run_scan(admin_msg: Any, chat_id: Union[int, str], limit: int, offset_id: int = 0) -> None:
@@ -1426,8 +1439,8 @@ async def _run_scan(admin_msg: Any, chat_id: Union[int, str], limit: int, offset
 
     status = await admin_msg.reply_text(
         f"🔍 Starting scan of <code>{chat_id}</code> using "
-        f"{'<b>User Helper</b>' if history_client == user_app else '<b>Bot Account</b>'}… "
-        f"({SCAN_WORKERS} workers)",
+        f"{'<b>User Helper</b>' if history_client != app else '<b>Bot Account</b>'}… "
+        f"({SCAN_WORKERS} workers, {len(user_apps)} user helper(s))",
         parse_mode=ParseMode.HTML,
     )
 
@@ -1445,24 +1458,37 @@ async def _run_scan(admin_msg: Any, chat_id: Union[int, str], limit: int, offset
             wait = EDIT_DELAY - (_loop_time() - last_edit_ts[0])
             if wait > 0:
                 await asyncio.sleep(wait)
-            # Always try bot account first for edits, fallback to history_client
-            for edit_client in ([app, history_client] if history_client != app else [app]):
+
+            # Build edit candidate list: bot first, then cached user account,
+            # then remaining user accounts (avoids trying all every time)
+            cached = _channel_edit_client.get(chat_id_str)
+            candidates: list[Client] = [app]
+            if cached and cached != app:
+                candidates.append(cached)
+            for ua in user_apps:
+                if ua not in candidates:
+                    candidates.append(ua)
+
+            for edit_client in candidates:
                 try:
                     await edit_client.edit_message_caption(chat_id, msg_id, caption, parse_mode=ParseMode.HTML)
                     counters["edited"] += 1
+                    _channel_edit_client[chat_id_str] = edit_client  # cache winner
                     break
                 except MessageNotModified:
                     counters["skipped"] += 1
+                    _channel_edit_client[chat_id_str] = edit_client
                     break
                 except FloodWait as exc:
                     await _handle_flood_wait(exc.value)
                     await asyncio.sleep(exc.value)
                     continue
                 except Exception as exc:
-                    if edit_client != history_client:
-                        logger.debug("Bot edit failed for %s, trying user helper: %s", msg_id, exc)
+                    is_last = edit_client == candidates[-1]
+                    if not is_last:
+                        logger.debug("Edit client %s failed for %s (%s), trying next", edit_client.name, msg_id, type(exc).__name__)
                         continue
-                    logger.error("Edit failed for %s: %s", msg_id, exc)
+                    logger.error("All edit clients failed for %s: %s", msg_id, exc)
                     counters["errors"] += 1
             last_edit_ts[0] = _loop_time()
 
@@ -1589,14 +1615,14 @@ async def main() -> None:
         logger.warning("ALLOWED_CHATS is empty. Channel/group auto-editing is currently disabled.")
 
     await app.start()
-    if user_app:
-        await user_app.start()
+    for ua in user_apps:
+        await ua.start()
 
     try:
         me = await app.get_me()
         logger.info("@%s started", me.username or me.id)
-        if user_app:
-            helper = await user_app.get_me()
+        for ua in user_apps:
+            helper = await ua.get_me()
             logger.info("User Helper started: @%s", helper.username or helper.id)
 
         try:
@@ -1615,9 +1641,9 @@ async def main() -> None:
             scheduler.shutdown(wait=False)
         except Exception:
             pass
-        if user_app:
+        for ua in user_apps:
             try:
-                await user_app.stop()
+                await ua.stop()
             except Exception:
                 pass
         try:
