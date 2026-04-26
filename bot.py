@@ -1435,7 +1435,9 @@ async def _resolve_scan_client(chat_id: Union[int, str]) -> Client:
         try:
             async for _ in ua.get_chat_history(chat_id, limit=1):
                 break
-            logger.info("Bot access failed for %s, using User Helper (%s)", chat_id, await ua.get_me())
+            me = await ua.get_me()
+            name = f"@{me.username}" if me.username else me.first_name
+            logger.info("Bot access failed for %s, using User Helper (%s)", chat_id, name)
             return ua
         except Exception:
             continue
@@ -1446,6 +1448,8 @@ async def _run_scan(admin_msg: Any, chat_id: Union[int, str], limit: int, offset
     chat_id_str = str(chat_id)
     try:
         history_client = await _resolve_scan_client(chat_id)
+        me = await history_client.get_me()
+        account_name = f"@{me.username}" if me.username else me.first_name
     except Exception:
         _scan_active[chat_id_str] = False
         await admin_msg.reply_text(
@@ -1459,7 +1463,7 @@ async def _run_scan(admin_msg: Any, chat_id: Union[int, str], limit: int, offset
     dir_str = "oldest to newest" if reverse else "newest to oldest"
     status = await admin_msg.reply_text(
         f"🔍 Starting scan of <code>{chat_id}</code> ({dir_str}) using "
-        f"{'<b>User Helper</b>' if history_client != app else '<b>Bot Account</b>'}… "
+        f"{'<b>User Helper</b>' if history_client != app else '<b>Bot Account</b>'} ({account_name})… "
         f"({SCAN_WORKERS} workers, {len(user_apps)} user helper(s))",
         parse_mode=ParseMode.HTML,
     )
