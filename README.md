@@ -108,14 +108,17 @@ ADMIN_IDS=111111111,222222222
 
 ALLOWED_CHATS=-1001234567890,-1009876543210
 
-# Primary user account session for scanning restricted channels
-# STRING_SESSION=your_session_string
+# Optional: user account session(s) for scanning restricted channels
+# Add STRING_SESSION_2, STRING_SESSION_3, etc. for additional accounts
+# The bot will try each account until one can edit the message (fixes MESSAGE_AUTHOR_REQUIRED)
+STRING_SESSION=
+# STRING_SESSION_2=
 
-# Additional user accounts — bot tries each until one can edit the message
-# Use this if messages in a channel were posted by different accounts
-# (fixes MESSAGE_AUTHOR_REQUIRED errors)
-# STRING_SESSION_2=second_session_string
-# STRING_SESSION_3=third_session_string
+# Minimum seconds between caption edits during scan (lower = faster, higher = safer vs FloodWait)
+EDIT_DELAY=1.5
+
+# Number of messages processed concurrently during /scan (default: 2; keep low to avoid DC auth FloodWait)
+SCAN_WORKERS=2
 ```
 
 Configuration reference:
@@ -179,13 +182,33 @@ The Docker image installs both `ffmpeg` and `mediainfo`.
 
 Scan examples:
 
-```
-/scan -1001234567890
+```bash
+# Scan last 100 messages from channel (-1001234567890)
 /scan -1001234567890 100
-/scan -1001234567890 0 54321
-/scan https://t.me/c/1234567890/100
-/scan https://t.me/c/1234567890/50/100
-/stopscan -1001234567890
+
+# Scan starting from message ID 500
+/scan -1001234567890 0 500
+
+# Scan from oldest to newest (forward in time)
+/scan -1001234567890 100 500 rev
+
+# Scan using a message link
+/scan https://t.me/c/1234567890/3400
+```
+
+### CLI Mode
+
+You can also run scans directly from the terminal without using the Telegram bot interface. This provides a live status bar and automatically exits when the scan is finished.
+
+```bash
+# Basic scan
+python bot.py --scan -1001234567890
+
+# With options
+python bot.py --scan -1001234567890 --limit 100 --offset 500 --reverse
+
+# Using a link
+python bot.py --scan https://t.me/c/1234567890/3400
 ```
 
 The `/scan` command accepts direct Telegram message links (including topic links). The scan starts from the linked message onwards. Scans run with `SCAN_WORKERS` parallel workers and use the bot account for all edits and media streaming.

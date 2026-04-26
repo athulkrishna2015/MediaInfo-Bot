@@ -1344,14 +1344,19 @@ async def scan_cmd(_, message: Any) -> None:
     parts = message.text.split()
     if len(parts) < 2:
         await message.reply_text(
-            "⚠️ Usage: <code>/scan &lt;chat_id_or_link&gt; [limit] [offset_id]</code>\n\n"
+            "⚠️ Usage: <code>/scan &lt;chat_id_or_link&gt; [limit] [offset_id] [rev]</code>\n\n"
             "Examples:\n"
             "<code>/scan https://t.me/c/12345/678</code> — scan starting from msg 678\n"
             "<code>/scan -1001234567890 100</code> — scan last 100 posts\n"
-            "<code>/scan username 0 1234</code> — scan starting from msg 1234",
+            "<code>/scan username 0 1234 rev</code> — scan forward from msg 1234",
             parse_mode=ParseMode.HTML,
         )
         return
+
+    reverse = False
+    if len(parts) > 2 and parts[-1].lower() in ("rev", "reverse", "--rev", "--reverse"):
+        reverse = True
+        parts.pop()
 
     target_str = parts[1]
     try:
@@ -1387,7 +1392,7 @@ async def scan_cmd(_, message: Any) -> None:
         return
 
     _scan_active[chat_id_str] = True
-    asyncio.create_task(_run_scan(message, chat_id, limit, offset_id))
+    asyncio.create_task(_run_scan(message, chat_id, limit, offset_id, reverse))
 
 
 @app.on_message(filters.command("stopscan") & ADMIN_FILTER)
@@ -1433,7 +1438,7 @@ async def _resolve_scan_client(chat_id: Union[int, str]) -> Client:
     raise RuntimeError(f"No client can access history for {chat_id}")
 
 
-async def _run_scan(admin_msg: Any, chat_id: Union[int, str], limit: int, offset_id: int = 0) -> None:
+async def _run_scan(admin_msg: Any, chat_id: Union[int, str], limit: int, offset_id: int = 0, reverse: bool = False) -> None:
     chat_id_str = str(chat_id)
     try:
         history_client = await _resolve_scan_client(chat_id)
@@ -1447,8 +1452,9 @@ async def _run_scan(admin_msg: Any, chat_id: Union[int, str], limit: int, offset
         )
         return
 
+    dir_str = "oldest to newest" if reverse else "newest to oldest"
     status = await admin_msg.reply_text(
-        f"🔍 Starting scan of <code>{chat_id}</code> using "
+        f"🔍 Starting scan of <code>{chat_id}</code> ({dir_str}) using "
         f"{'<b>User Helper</b>' if history_client != app else '<b>Bot Account</b>'}… "
         f"({SCAN_WORKERS} workers, {len(user_apps)} user helper(s))",
         parse_mode=ParseMode.HTML,
@@ -1525,10 +1531,55 @@ async def _run_scan(admin_msg: Any, chat_id: Union[int, str], limit: int, offset
                 await _remove_path(file_path)
         await _edit_with_delay(message.id, caption)
 
+    async def _iter_history():
+        if not reverse:
+            async for msg in history_client.get_chat_history(chat_id, limit=limit or None, offset_id=offset_id or 0):
+                yield msg
+            return
+
+        # Forward scan (oldest to newest)
+        max_id = 0
+        async for msg in history_client.get_chat_history(chat_id, limit=1):
+            max_id = msg.id
+            break
+            
+        if not max_id:
+            return
+            
+        current_id = offset_id or 1
+        yielded = 0
+        
+        while current_id <= max_id and (limit == 0 or yielded < limit):
+            batch_size = 200
+            if limit > 0:
+                batch_size = min(batch_size, limit - yielded)
+                
+            end_id = min(current_id + batch_size, max_id + 1)
+            ids = list(range(current_id, end_id))
+            
+            try:
+                messages = await history_client.get_messages(chat_id, ids)
+            except FloodWait as exc:
+                await _handle_flood_wait(exc.value)
+                await asyncio.sleep(exc.value)
+                continue
+                
+            if not isinstance(messages, list):
+                messages = [messages]
+                
+            for msg in messages:
+                if msg and getattr(msg, "empty", False) is False:
+                    yield msg
+                    yielded += 1
+                    if limit > 0 and yielded >= limit:
+                        break
+                        
+            current_id = end_id
+
     pending: list[asyncio.Task] = []
 
     try:
-        async for message in history_client.get_chat_history(chat_id, limit=limit or None, offset_id=offset_id or 0):
+        async for message in _iter_history():
             media_group_id = getattr(message, "media_group_id", None)
             group = None
             if media_group_id and not message.document:
@@ -1645,9 +1696,10 @@ async def main(cli: "argparse.Namespace | None" = None) -> None:
                 
             offset_id = cli.offset if cli.offset > 0 else parsed_offset
             
-            print(f"\n🔍 Starting CLI scan of {chat_id} (limit={cli.limit}, offset={offset_id})\n")
+            dir_str = "oldest to newest" if cli.reverse else "newest to oldest"
+            print(f"\n🔍 Starting CLI scan of {chat_id} ({dir_str}) (limit={cli.limit}, offset={offset_id})\n")
             _scan_active[str(chat_id)] = True
-            await _run_scan(_TerminalMsg(), chat_id, cli.limit, offset_id)
+            await _run_scan(_TerminalMsg(), chat_id, cli.limit, offset_id, cli.reverse)
             print()  # newline after in-place status line
             return
         # ──────────────────────────────────────────────────────────────────────
@@ -1703,6 +1755,7 @@ def _parse_cli() -> argparse.Namespace:
     parser.add_argument("--scan", metavar="CHAT", help="Chat ID or Telegram link to scan")
     parser.add_argument("--limit", type=int, default=0, help="Max messages to scan (0 = all)")
     parser.add_argument("--offset", type=int, default=0, help="Start from this message ID")
+    parser.add_argument("--reverse", action="store_true", help="Scan from oldest to newest instead of newest to oldest")
     return parser.parse_args()
 
 
