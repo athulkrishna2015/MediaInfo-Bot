@@ -27,7 +27,7 @@ from aiofiles import open as aiopen
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pyrogram import Client, filters
 from pyrogram.enums import ParseMode
-from pyrogram.errors import FloodWait, MessageNotModified, PeerIdInvalid
+from pyrogram.errors import FloodWait, InlineBotRequired, MessageNotModified, PeerIdInvalid
 
 from config import (
     ADMIN_ID,
@@ -1494,6 +1494,10 @@ async def _run_scan(admin_msg: Any, chat_id: Union[int, str], limit: int, offset
                 except MessageNotModified:
                     counters["skipped"] += 1
                     _channel_edit_client[chat_id_str] = edit_client
+                    break
+                except InlineBotRequired:
+                    counters["skipped"] += 1
+                    logger.debug("Skipped inline-bot message %s", msg_id)
                     break
                 except FloodWait as exc:
                     await _handle_flood_wait(exc.value)
