@@ -1584,9 +1584,11 @@ async def _run_scan(admin_msg: Any, chat_id: Union[int, str], limit: int, offset
             current_id = end_id
 
     pending: list[asyncio.Task] = []
+    last_msg_id = None
 
     try:
         async for message in _iter_history():
+            last_msg_id = message.id
             media_group_id = getattr(message, "media_group_id", None)
             group = None
             if media_group_id and not message.document:
@@ -1628,33 +1630,47 @@ async def _run_scan(admin_msg: Any, chat_id: Union[int, str], limit: int, offset
             await asyncio.gather(*pending, return_exceptions=True)
 
         if not _scan_active.get(chat_id_str, False):
+            last_str = f" (Last msg ID: {last_msg_id})" if last_msg_id else ""
             await _safe_edit(
                 status,
-                f"🛑 Scan stopped.\n\n📊 Scanned: {counters['scanned']} | ✅ Edited: {counters['edited']} | ⏭ Skipped: {counters['skipped']} | ❌ Errors: {counters['errors']}",
+                f"🛑 Scan stopped.{last_str}\n\n📊 Scanned: {counters['scanned']} | ✅ Edited: {counters['edited']} | ⏭ Skipped: {counters['skipped']} | ❌ Errors: {counters['errors']}",
                 force=True,
             )
             return
 
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        logger.warning("Scan interrupted by user/system")
+        last_str = f" (Last msg ID: {last_msg_id})" if last_msg_id else ""
+        await _safe_edit(
+            status,
+            f"🛑 <b>Scan Interrupted!</b>{last_str}\n\n📊 Scanned: {counters['scanned']} | ✅ Edited: {counters['edited']} | ⏭ Skipped: {counters['skipped']} | ❌ Errors: {counters['errors']}",
+            parse_mode=ParseMode.HTML,
+            force=True,
+        )
+        return
     except FloodWait as exc:
         logger.warning("Scan history FloodWait: sleeping %ss", exc.value)
         await asyncio.sleep(exc.value)
     except Exception as exc:
         logger.error("Scan failed: %s", exc)
+        last_str = f" (Last msg ID: {last_msg_id})" if last_msg_id else ""
         await _safe_edit(
             status,
-            f"❌ Scan error: <code>{html.escape(str(exc))}</code>\n\n"
+            f"❌ Scan error: <code>{html.escape(str(exc))}</code>{last_str}\n\n"
             f"📊 Scanned: {counters['scanned']} | ✅ Edited: {counters['edited']} | ⏭ Skipped: {counters['skipped']} | ❌ Errors: {counters['errors']}",
             parse_mode=ParseMode.HTML,
             force=True,
         )
         return
     finally:
-        await _safe_edit(
-            status,
-            f"✅ <b>Scan Complete!</b>\n\n📊 Scanned: {counters['scanned']} | ✅ Edited: {counters['edited']} | ⏭ Skipped: {counters['skipped']} | ❌ Errors: {counters['errors']}",
-            parse_mode=ParseMode.HTML,
-            force=True,
-        )
+        if _scan_active.get(chat_id_str, False):
+            last_str = f" (Last msg ID: {last_msg_id})" if last_msg_id else ""
+            await _safe_edit(
+                status,
+                f"✅ <b>Scan Complete!</b>{last_str}\n\n📊 Scanned: {counters['scanned']} | ✅ Edited: {counters['edited']} | ⏭ Skipped: {counters['skipped']} | ❌ Errors: {counters['errors']}",
+                parse_mode=ParseMode.HTML,
+                force=True,
+            )
         _scan_active.pop(chat_id_str, None)
 
 
