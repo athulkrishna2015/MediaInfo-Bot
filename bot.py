@@ -26,7 +26,7 @@ import psutil
 from aiofiles import open as aiopen
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pyrogram import Client, filters
-from pyrogram.enums import ParseMode
+from pyrogram.enums import ParseMode, ChatType
 from pyrogram.errors import FloodWait, InlineBotRequired, MessageNotModified, PeerIdInvalid
 
 from config import (
@@ -1446,6 +1446,16 @@ async def _resolve_scan_client(chat_id: Union[int, str]) -> Client:
 
 async def _run_scan(admin_msg: Any, chat_id: Union[int, str], limit: int, offset_id: int = 0, reverse: bool = False) -> None:
     chat_id_str = str(chat_id)
+    
+    # Cache our own client IDs so we can quickly verify authorship in groups
+    client_map: dict[int, Client] = {}
+    for c in [app] + user_apps:
+        try:
+            me = await c.get_me()
+            client_map[me.id] = c
+        except Exception:
+            pass
+
     try:
         history_client = await _resolve_scan_client(chat_id)
         me = await history_client.get_me()
@@ -1477,21 +1487,24 @@ async def _run_scan(admin_msg: Any, chat_id: Union[int, str], limit: int, offset
     edit_lock = asyncio.Lock()
     last_edit_ts: list[float] = [0.0]
 
-    async def _edit_with_delay(msg_id: int, caption: str) -> None:
+    async def _edit_with_delay(msg_id: int, caption: str, author_client: Client | None = None) -> None:
         async with edit_lock:
             wait = EDIT_DELAY - (_loop_time() - last_edit_ts[0])
             if wait > 0:
                 await asyncio.sleep(wait)
 
-            # Build edit candidate list: bot first, then cached user account,
-            # then remaining user accounts (avoids trying all every time)
-            cached = _channel_edit_client.get(chat_id_str)
-            candidates: list[Client] = [app]
-            if cached and cached != app:
-                candidates.append(cached)
-            for ua in user_apps:
-                if ua not in candidates:
-                    candidates.append(ua)
+            # Build edit candidate list
+            candidates: list[Client] = []
+            if author_client:
+                candidates = [author_client]
+            else:
+                cached = _channel_edit_client.get(chat_id_str)
+                candidates = [app]
+                if cached and cached != app:
+                    candidates.append(cached)
+                for ua in user_apps:
+                    if ua not in candidates:
+                        candidates.append(ua)
 
             for edit_client in candidates:
                 try:
@@ -1521,7 +1534,7 @@ async def _run_scan(admin_msg: Any, chat_id: Union[int, str], limit: int, offset
             last_edit_ts[0] = _loop_time()
 
 
-    async def _process_one(message: Any, group: Any) -> None:
+    async def _process_one(message: Any, group: Any, author_client: Client) -> None:
         file_path = None
         async with proc_sem:
             try:
@@ -1541,7 +1554,7 @@ async def _run_scan(admin_msg: Any, chat_id: Union[int, str], limit: int, offset
                 return
             finally:
                 await _remove_path(file_path)
-        await _edit_with_delay(message.id, caption)
+        await _edit_with_delay(message.id, caption, author_client)
 
     async def _iter_history():
         if not reverse:
@@ -1618,6 +1631,12 @@ async def _run_scan(admin_msg: Any, chat_id: Union[int, str], limit: int, offset
 
             counters["scanned"] += 1
 
+            if counters["scanned"] % 25 == 0:
+                await _safe_edit(
+                    status,
+                    f"🔍 Scanning… {counters['scanned']} checked | ✅ {counters['edited']} edited | ⏭ {counters['skipped']} skipped | ❌ {counters['errors']} errors",
+                )
+
             # Telegram does not allow editing forwarded messages
             if getattr(message, "forward_date", None) or getattr(message, "forward_origin", None):
                 counters["skipped"] += 1
@@ -1627,13 +1646,20 @@ async def _run_scan(admin_msg: Any, chat_id: Union[int, str], limit: int, offset
                 counters["skipped"] += 1
                 continue
 
-            pending.append(asyncio.create_task(_process_one(message, group)))
+            author_client = history_client
+            chat_type = getattr(getattr(message, "chat", None), "type", None)
+            if chat_type in [ChatType.GROUP, ChatType.SUPERGROUP]:
+                sender_user_id = getattr(message.from_user, "id", None)
+                sender_chat_id = getattr(getattr(message, "sender_chat", None), "id", None)
+                if sender_user_id in client_map:
+                    author_client = client_map[sender_user_id]
+                elif sender_chat_id in client_map:
+                    author_client = client_map[sender_chat_id]
+                else:
+                    counters["skipped"] += 1
+                    continue
 
-            if counters["scanned"] % 25 == 0:
-                await _safe_edit(
-                    status,
-                    f"🔍 Scanning… {counters['scanned']} checked | ✅ {counters['edited']} edited | ⏭ {counters['skipped']} skipped | ❌ {counters['errors']} errors",
-                )
+            pending.append(asyncio.create_task(_process_one(message, group, author_client)))
 
         # Wait for all in-flight tasks to finish
         if pending:
