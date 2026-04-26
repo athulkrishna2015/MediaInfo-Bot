@@ -122,10 +122,11 @@ async def _handle_flood_wait(exc_value: int):
         if now < _flood_wait_until:
             return
         _flood_wait_until = now + exc_value + 2
+        resume_real_time = time.time() + exc_value + 2
         logger.warning(
             "⚡ FloodWait hit: Pausing for %ss (until %s)",
             exc_value,
-            time.strftime("%H:%M:%S", time.localtime(_flood_wait_until)),
+            time.strftime("%H:%M:%S", time.localtime(resume_real_time)),
         )
 
 
