@@ -6,6 +6,7 @@ try:
 except RuntimeError:
     asyncio.set_event_loop(asyncio.new_event_loop())
 
+import argparse
 import gc
 import html
 import json
@@ -1306,21 +1307,7 @@ async def update_cmd(_, message: Any) -> None:
 _scan_active: dict[str, bool] = {}
 
 
-@app.on_message(filters.command("scan") & ADMIN_FILTER)
-async def scan_cmd(_, message: Any) -> None:
-    parts = message.text.split()
-    if len(parts) < 2:
-        await message.reply_text(
-            "⚠️ Usage: <code>/scan &lt;chat_id_or_link&gt; [limit] [offset_id]</code>\n\n"
-            "Examples:\n"
-            "<code>/scan https://t.me/c/12345/678</code> — scan starting from msg 678\n"
-            "<code>/scan -1001234567890 100</code> — scan last 100 posts\n"
-            "<code>/scan username 0 1234</code> — scan starting from msg 1234",
-            parse_mode=ParseMode.HTML,
-        )
-        return
-
-    target_str = parts[1]
+def _parse_scan_target(target_str: str) -> tuple[Union[int, str], int]:
     offset_id = 0
     chat_id: Union[int, str] = 0
 
@@ -1342,13 +1329,36 @@ async def scan_cmd(_, message: Any) -> None:
                     pass
                     
         if not chat_id:
-            await message.reply_text("❌ Invalid link format.")
-            return
+            raise ValueError("Invalid link format.")
     else:
         try:
             chat_id = int(target_str)
         except ValueError:
             chat_id = target_str
+            
+    return chat_id, offset_id
+
+
+@app.on_message(filters.command("scan") & ADMIN_FILTER)
+async def scan_cmd(_, message: Any) -> None:
+    parts = message.text.split()
+    if len(parts) < 2:
+        await message.reply_text(
+            "⚠️ Usage: <code>/scan &lt;chat_id_or_link&gt; [limit] [offset_id]</code>\n\n"
+            "Examples:\n"
+            "<code>/scan https://t.me/c/12345/678</code> — scan starting from msg 678\n"
+            "<code>/scan -1001234567890 100</code> — scan last 100 posts\n"
+            "<code>/scan username 0 1234</code> — scan starting from msg 1234",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    target_str = parts[1]
+    try:
+        chat_id, offset_id = _parse_scan_target(target_str)
+    except ValueError as exc:
+        await message.reply_text(f"❌ {exc}")
+        return
 
     limit = 0
     if len(parts) >= 3:
@@ -1606,7 +1616,7 @@ def _install_deps() -> None:
         logger.info("System dependencies are available.")
 
 
-async def main() -> None:
+async def main(cli: "argparse.Namespace | None" = None) -> None:
     validate_config()
     gc.set_threshold(*GC_THRESHOLD)
     _install_deps()
@@ -1624,6 +1634,23 @@ async def main() -> None:
         for ua in user_apps:
             helper = await ua.get_me()
             logger.info("User Helper started: @%s", helper.username or helper.id)
+
+        # ── CLI scan mode ──────────────────────────────────────────────────────
+        if cli and cli.scan:
+            try:
+                chat_id, parsed_offset = _parse_scan_target(cli.scan)
+            except ValueError as exc:
+                print(f"❌ {exc}")
+                return
+                
+            offset_id = cli.offset if cli.offset > 0 else parsed_offset
+            
+            print(f"\n🔍 Starting CLI scan of {chat_id} (limit={cli.limit}, offset={offset_id})\n")
+            _scan_active[str(chat_id)] = True
+            await _run_scan(_TerminalMsg(), chat_id, cli.limit, offset_id)
+            print()  # newline after in-place status line
+            return
+        # ──────────────────────────────────────────────────────────────────────
 
         try:
             await app.send_message(ADMIN_ID, "🚀 Bot Started")
@@ -1652,9 +1679,35 @@ async def main() -> None:
             pass
 
 
+
+class _TerminalMsg:
+    """Proxy for Telegram message used when scan is triggered from the CLI."""
+
+    class _Status:
+        async def edit_text(self, text: str, **_kwargs) -> None:
+            # Strip HTML tags for clean terminal display
+            clean = re.sub(r"<[^>]+>", "", text)
+            sys.stdout.write(f"\r\033[K{clean}")
+            sys.stdout.flush()
+
+    async def reply_text(self, text: str, **_kwargs) -> "_TerminalMsg._Status":
+        clean = re.sub(r"<[^>]+>", "", text)
+        print(clean)
+        return self._Status()
+
+
+def _parse_cli() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="MediaInfo Bot")
+    parser.add_argument("--scan", metavar="CHAT", help="Chat ID or Telegram link to scan")
+    parser.add_argument("--limit", type=int, default=0, help="Max messages to scan (0 = all)")
+    parser.add_argument("--offset", type=int, default=0, help="Start from this message ID")
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
+    _cli = _parse_cli()
     try:
-        app.run(main())
+        app.run(main(_cli))
     except RuntimeError as exc:
         logger.error("%s", exc)
         raise SystemExit(1)
