@@ -108,8 +108,14 @@ ADMIN_IDS=111111111,222222222
 
 ALLOWED_CHATS=-1001234567890,-1009876543210
 
-# Optional: user account session for scanning restricted channels
+# Primary user account session for scanning restricted channels
 # STRING_SESSION=your_session_string
+
+# Additional user accounts — bot tries each until one can edit the message
+# Use this if messages in a channel were posted by different accounts
+# (fixes MESSAGE_AUTHOR_REQUIRED errors)
+# STRING_SESSION_2=second_session_string
+# STRING_SESSION_3=third_session_string
 ```
 
 Configuration reference:
@@ -122,9 +128,10 @@ Configuration reference:
 | `ADMIN_IDS` | Comma-separated Telegram user IDs for admin commands | Yes* |
 | `ADMIN_ID` | Legacy single admin ID (used if `ADMIN_IDS` is not set) | Yes* |
 | `ALLOWED_CHATS` | Comma-separated chat IDs for auto-editing | No |
-| `STRING_SESSION` | User account session for history-scan fallback | No |
+| `STRING_SESSION` | Primary user account session for history-scan fallback | No |
+| `STRING_SESSION_2` … `STRING_SESSION_N` | Additional user accounts; tried in order when editing fails | No |
 | `EDIT_DELAY` | Minimum seconds between caption edits (default: `1.5`) | No |
-| `SCAN_WORKERS` | Parallel workers during `/scan` (default: `4`) | No |
+| `SCAN_WORKERS` | Parallel workers during `/scan` (default: `2`) | No |
 | `LOG_LEVEL` | Logging level (default: `INFO`) | No |
 | `LOG_FORMAT` | Python logging format string | No |
 | `GC_THRESHOLD_0` | GC threshold gen 0 (default: `500`) | No |
@@ -186,11 +193,13 @@ The `/scan` command accepts direct Telegram message links (including topic links
 ## Notes
 
 - If `ALLOWED_CHATS` is empty, auto-editing for channels/groups is disabled, but private chat features still work.
-- History scans use the bot account first. If the bot lacks history access and `STRING_SESSION` is configured, it falls back to the user helper for `get_chat_history` only. All media streaming and caption edits still use the bot account.
+- History scans use the bot account first. If the bot lacks history access and `STRING_SESSION` is configured, it falls back to the user helper for `get_chat_history` only. All media streaming and caption edits still attempt the bot account first.
+- **Multi-account editing**: If a message was posted by a specific user account (not the channel/bot), editing requires that account's session. Configure `STRING_SESSION_2`, `STRING_SESSION_3`, etc. The bot tries each account in order and caches the winning account per channel — so subsequent messages in the same channel go straight to the right account without retrying all of them.
 - Generic documents get a lightweight size caption instead of media-track details.
 - Photos do not invent a filename line if Telegram does not provide one.
 - FloodWait events are handled gracefully: a single warning is logged, all workers pause until the cooldown expires, and the terminal status line is suppressed during the wait.
 - Animated WebP files and stickers sent in channels are fully processed.
+- Keep `SCAN_WORKERS` at `1`–`2` when scanning channels where the user account streams cross-DC files to avoid `auth.ExportAuthorization` FloodWait.
 
 ## Project Structure
 
