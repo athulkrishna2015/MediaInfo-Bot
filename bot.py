@@ -1613,6 +1613,11 @@ async def _run_scan(admin_msg: Any, chat_id: Union[int, str], limit: int, offset
 
             counters["scanned"] += 1
 
+            # Telegram does not allow editing forwarded messages
+            if getattr(message, "forward_date", None) or getattr(message, "forward_origin", None):
+                counters["skipped"] += 1
+                continue
+
             if caption_has_media_info(message.caption or ""):
                 counters["skipped"] += 1
                 continue
