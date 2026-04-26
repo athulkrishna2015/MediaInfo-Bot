@@ -1682,8 +1682,10 @@ async def main(cli: "argparse.Namespace | None" = None) -> None:
 
 class _TerminalMsg:
     """Proxy for Telegram message used when scan is triggered from the CLI."""
+    id = 0
 
     class _Status:
+        id = 0
         async def edit_text(self, text: str, **_kwargs) -> None:
             # Strip HTML tags for clean terminal display
             clean = re.sub(r"<[^>]+>", "", text)
