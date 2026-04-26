@@ -922,7 +922,10 @@ async def _stream_chunk(client: Client, media: Any, size: int, path: str) -> boo
         except FloodWait:
             raise
         except OSError as exc:
-            # Non-retryable filesystem error
+            # If it's a network-related OSError (TimeoutError, ConnectionError, etc), let it fall through to retry
+            if isinstance(exc, (TimeoutError, ConnectionError)):
+                raise
+            # Otherwise treat as non-retryable filesystem error
             logger.warning("stream_chunk I/O error (%s): %s", size, exc)
             return False
         except Exception as exc:
